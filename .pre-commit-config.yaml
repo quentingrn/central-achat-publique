@@ -1,0 +1,19 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.0
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+  - repo: local
+    hooks:
+      - id: check-single-head
+        name: check single Alembic head
+        entry: scripts/ci/check_single_head.sh
+        language: system
+        pass_filenames: false
+      - id: check-migrations-immutable
+        name: check Alembic migrations immutability
+        entry: scripts/ci/check_migrations_immutable.sh
+        language: system
+        pass_filenames: false
