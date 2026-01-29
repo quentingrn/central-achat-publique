@@ -53,11 +53,13 @@ Verrous techniques en place:
 - POST /v1/discovery/compare (stub 501)
 
 ## Commandes utiles (start/test/format/db_reset/db_migrate)
-- Start: ./scripts/start.sh
+- Start: ./scripts/start.sh (POSTGRES_PORT et API_PORT configurables)
 - Test: ./scripts/test.sh
 - Format: ./scripts/format.sh
 - DB migrate: ./scripts/db_migrate.sh
 - DB reset: ./scripts/db_reset.sh
+- Prerequis venv: python3 -m venv .venv (scripts utilisent exclusivement .venv/bin/*, PYTHONNOUSERSITE=1)
+- Deps test: ./.venv/bin/pip install -e ".[test]"
 
 ## Etat des PRs (checklist)
 - PR0: structure + qualite OK
@@ -70,3 +72,8 @@ Verrous techniques en place:
 - 2026-01-29: UUID pour PK et JSONB pour champs semi-structures.
 - 2026-01-29: Scripts CI locaux pour garantir single-head, immutabilite et smoke DB.
 - 2026-01-29: Downgrade destructif volontairement bloque dans la baseline (M6).
+- 2026-01-29: Nettoyage automatique du port Postgres au demarrage pour eviter "port already allocated"; port configurable via POSTGRES_PORT.
+- 2026-01-29: start.sh force un .venv local, attend un healthcheck Postgres avec timeout, et utilise le binaire alembic du venv.
+- 2026-01-29: Packaging passe en layout src/ avec Hatchling packages explicites; scripts forcent .venv et PYTHONNOUSERSITE=1 pour eviter les fuites PlatformIO/conda.
+- 2026-01-29: Ajout du groupe de dependances [test] (pytest/httpx) et passage du startup FastAPI a lifespan pour supprimer le warning deprecation.
+- 2026-01-29: Strategie module-scopee pour discovery_compare: copie exacte de strategy.md dans modules/discovery_compare/strategy_discovery_compare.md, sans modifier le fichier racine reserve a ChatGPT.

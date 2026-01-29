@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.24.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -20,11 +20,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8.0",
-  "httpx>=0.27",
   "ruff>=0.5",
   "pre-commit>=3.7",
   "mypy>=1.10",
+]
+test = [
+  "pytest>=8",
+  "httpx>=0.28",
 ]
 
 [tool.ruff]
@@ -42,3 +44,6 @@ indent-style = "space"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/central_achat_publique"]

@@ -15,6 +15,11 @@ Bootstrap d'un monolithe modulaire (FastAPI + SQLAlchemy + Alembic) avec regles 
 ./scripts/format.sh
 ```
 
+## Installer les dependances de test
+```bash
+./.venv/bin/pip install -e ".[test]"
+```
+
 ## Pre-requis
 - Python 3.11+
 - Docker (pour PostgreSQL)

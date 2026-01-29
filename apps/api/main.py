@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
@@ -38,14 +39,15 @@ def _assert_db_at_head() -> None:
         )
 
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    _assert_db_at_head()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 app.add_middleware(TraceIdMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
-
-
-@app.on_event("startup")
-def _startup_check() -> None:
-    _assert_db_at_head()
 
 
 @app.get("/health")
