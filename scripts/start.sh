@@ -73,6 +73,20 @@ else
   log "warning: git not available; using current directory"
 fi
 
+load_env_file() {
+  local file="$1"
+  if [ -f "$file" ]; then
+    log "loading ${file}"
+    set -a
+    # shellcheck source=/dev/null
+    . "$file"
+    set +a
+  fi
+}
+
+load_env_file ".env"
+load_env_file ".env.local"
+
 export PYTHONPATH="$ROOT_DIR"
 export PYTHONNOUSERSITE=1
 
@@ -82,6 +96,39 @@ export POSTGRES_PORT
 
 if [ -z "${DATABASE_URL:-}" ]; then
   export DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:${POSTGRES_PORT}/central_achat_publique"
+fi
+
+SNAPSHOT_PROVIDER=${DISCOVERY_COMPARE_SNAPSHOT_PROVIDER:-playwright}
+PLAYWRIGHT_MODE=${PLAYWRIGHT_MCP_MODE:-http}
+SNAPSHOT_REQUIRE=${DISCOVERY_COMPARE_SNAPSHOT_REQUIRE:-0}
+
+if [ "$SNAPSHOT_PROVIDER" = "playwright" ] && [ "$PLAYWRIGHT_MODE" = "stdio" ]; then
+  if ! command -v node >/dev/null 2>&1; then
+    log "node not found (required for Playwright MCP stdio)"
+    if [ "$SNAPSHOT_REQUIRE" = "1" ]; then
+      exit 1
+    fi
+    log "falling back to snapshot provider=stub for this run"
+    export DISCOVERY_COMPARE_SNAPSHOT_PROVIDER=stub
+  fi
+  if ! command -v npx >/dev/null 2>&1; then
+    log "npx not found (required for Playwright MCP stdio)"
+    if [ "$SNAPSHOT_REQUIRE" = "1" ]; then
+      exit 1
+    fi
+    log "falling back to snapshot provider=stub for this run"
+    export DISCOVERY_COMPARE_SNAPSHOT_PROVIDER=stub
+  fi
+  if [ "${PLAYWRIGHT_MCP_INSTALL:-0}" = "1" ] && [ -z "${CI:-}" ]; then
+    log "installing Playwright browsers (opt-in)"
+    if ! npx playwright install --with-deps; then
+      log "playwright install failed"
+      if [ "$SNAPSHOT_REQUIRE" = "1" ]; then
+        exit 1
+      fi
+      log "continuing without Playwright install"
+    fi
+  fi
 fi
 
 if ! command -v lsof >/dev/null 2>&1; then

@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
-
-from shared.db.base import Base
-from shared.db.settings import get_db_settings
 
 # Import models so Alembic can detect metadata for autogenerate
 import modules.discovery_compare.infrastructure.persistence.models  # noqa: F401
+from alembic import context
+from shared.db.base import Base
+from shared.db.settings import get_db_settings
 
 config = context.config
 

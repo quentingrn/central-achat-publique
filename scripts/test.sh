@@ -29,8 +29,28 @@ export DATABASE_URL
 export PYTHONPATH="$ROOT_DIR"
 export PYTHONNOUSERSITE=1
 
+ensure_test_deps() {
+  if "$PY" - <<'PY' >/dev/null 2>&1
+import fastapi  # noqa: F401
+import httpx  # noqa: F401
+import pytest  # noqa: F401
+import jsonschema  # noqa: F401
+PY
+  then
+    return 0
+  fi
+
+  printf "[test] installing test dependencies via ./.venv/bin/pip install -e \".[test]\"...\n"
+  if ! "$ROOT_DIR/.venv/bin/pip" install -e ".[test]"; then
+    printf "[test] dependency install failed. Ensure network access and try again.\n"
+    exit 1
+  fi
+}
+
+ensure_test_deps
+
 if [ ! -x "$ROOT_DIR/.venv/bin/pytest" ]; then
-  printf "[test] pytest not found in .venv. Run: ./.venv/bin/pip install -e \".[test]\"\n"
+  printf "[test] pytest still missing after install. Aborting.\n"
   exit 1
 fi
 

@@ -1,6 +1,6 @@
 import logging
-from pathlib import Path
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
@@ -10,6 +10,7 @@ from sqlalchemy import create_engine
 
 from apps.api.middleware.request_logging import RequestLoggingMiddleware
 from apps.api.middleware.trace_id import TraceIdMiddleware
+from modules.discovery_compare.adapters.http.debug_router import router as debug_router
 from modules.discovery_compare.adapters.http.router import router as discovery_router
 from shared.db.settings import get_db_settings
 
@@ -56,3 +57,4 @@ def health() -> dict:
 
 
 app.include_router(discovery_router)
+app.include_router(debug_router)
