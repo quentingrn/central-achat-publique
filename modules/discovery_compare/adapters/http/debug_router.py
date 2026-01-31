@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from apps.api.guards import require_debug_access
 from modules.discovery_compare.infrastructure.persistence.models import (
     CompareRun,
     LlmRun,
@@ -10,7 +11,11 @@ from modules.discovery_compare.infrastructure.persistence.models import (
 )
 from shared.db.session import get_session
 
-router = APIRouter(prefix="/v1/debug", tags=["debug"])
+router = APIRouter(
+    prefix="/v1/debug",
+    tags=["debug"],
+    dependencies=[Depends(require_debug_access)],
+)
 
 
 def _serialize_run(run: CompareRun, events: list[RunEvent]) -> dict:

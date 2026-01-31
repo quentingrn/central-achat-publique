@@ -36,7 +36,7 @@ fi
 
 check_diff() {
   local diff_output
-  diff_output=$(git diff --name-status "$@" -- alembic/versions || true)
+  diff_output=$(git diff --name-status "$@" -- alembic/versions ":(exclude)alembic/versions/__pycache__" || true)
   if [ -z "$diff_output" ]; then
     return 0
   fi

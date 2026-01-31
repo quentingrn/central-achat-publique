@@ -14,6 +14,6 @@ class StubSnapshotProvider(SnapshotProvider):
             final_url=url,
             http_status=200,
             content_bytes=content,
-            content_type="text/html",
+            content_type=None,
             metadata={"stub": True},
         )

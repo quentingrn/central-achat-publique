@@ -26,19 +26,21 @@ from modules.discovery_compare.application.ports import (
     OfferCandidateProvider,
     ProductCandidate,
     ProductCandidateProvider,
-    SnapshotProvider,
-    SnapshotResult,
 )
 from modules.discovery_compare.application.prompts import COMPARABILITY_GATE_PROMPT_V1
 from modules.discovery_compare.application.run_recorder import RunRecorder
 from modules.discovery_compare.application.settings import get_discovery_compare_settings
 from modules.discovery_compare.domain.comparability import evaluate_comparability
-from modules.discovery_compare.infrastructure.persistence.models import (
-    ComparableCandidate,
-    PageSnapshot,
-    Product,
+from modules.discovery_compare.infrastructure.persistence.models import ComparableCandidate, Product
+from modules.snapshot.adapters.schemas import (
+    SnapshotContext,
+    SnapshotProviderConfig,
+    SnapshotStatus,
 )
-from modules.discovery_compare.infrastructure.providers.playwright_mcp import SnapshotCaptureError
+from modules.snapshot.application.facade import capture_page
+from modules.snapshot.application.ports import SnapshotArtifactStore, SnapshotProvider
+from modules.snapshot.infrastructure.persistence import SqlSnapshotRepository
+from modules.snapshot.infrastructure.persistence.repository import InMemoryArtifactStore
 
 
 @dataclass(frozen=True)
@@ -46,18 +48,26 @@ class AgentRunnerConfig:
     source_url: str | None = None
 
 
+class SnapshotCaptureError(RuntimeError):
+    def __init__(self, message: str, details: dict | None = None) -> None:
+        super().__init__(message)
+        self.details = details or {}
+
+
 class AgentRunner:
     def __init__(
         self,
         session: Session,
-        snapshot_provider: SnapshotProvider,
+        snapshot_provider: SnapshotProvider | None,
         product_candidate_provider: ProductCandidateProvider,
         offer_candidate_provider: OfferCandidateProvider,
         llm_client: LlmClient | None = None,
+        snapshot_artifact_store: SnapshotArtifactStore | None = None,
     ) -> None:
         self.session = session
         self.recorder = RunRecorder(session)
         self.snapshot_provider = snapshot_provider
+        self.snapshot_artifact_store = snapshot_artifact_store
         self.product_candidate_provider = product_candidate_provider
         self.offer_candidate_provider = offer_candidate_provider
         self.settings = get_discovery_compare_settings()
@@ -106,36 +116,17 @@ class AgentRunner:
             self.session.refresh(product)
             return product
 
-        def get_or_create_snapshot(
-            product_id: uuid.UUID, url: str, extracted_json: dict
-        ) -> PageSnapshot:
-            existing = (
-                self.session.query(PageSnapshot).filter(PageSnapshot.url == url).one_or_none()
-            )
-            if existing is not None:
-                payload = existing.extracted_json or {}
-                if "digest" not in payload:
-                    existing.extracted_json = extracted_json
-                    self.session.commit()
-                return existing
-            snapshot_row = PageSnapshot(
-                product_id=product_id,
-                url=url,
-                extracted_json=extracted_json,
-            )
-            self.session.add(snapshot_row)
-            self.session.commit()
-            self.session.refresh(snapshot_row)
-            return snapshot_row
-
-        def resolve_product(snapshot: SnapshotResult) -> ProductDigestV1:
+        def resolve_product(snapshot) -> ProductDigestV1:
             digest = snapshot.digest_json or {}
-            brand = digest.get("brand") or snapshot.extracted_json.get("brand")
-            model = digest.get("model") or snapshot.extracted_json.get("model")
+            identity = digest.get("product_identity") or {}
+            extracted = snapshot.extracted_json or {}
+            product = extracted.get("product") or {}
+            brand = identity.get("brand") or product.get("brand")
+            model = identity.get("model") or product.get("model")
             return ProductDigestV1(
                 brand=brand or "UNKNOWN",
                 model=model or "UNKNOWN",
-                source_url=snapshot.url_final,
+                source_url=snapshot.final_url,
             )
 
         def derive_candidate_digest(
@@ -180,53 +171,92 @@ class AgentRunner:
                 self.session.add(row)
                 self.session.commit()
 
-        def snapshot_payload(snapshot: SnapshotResult) -> dict:
-            html_excerpt = snapshot.html[:1000] if snapshot.html else None
+        def snapshot_provider_config() -> SnapshotProviderConfig:
+            provider_name = self.settings.snapshot_provider
+            if provider_name == "playwright":
+                provider_name = "playwright_mcp"
+            flags = {
+                "max_bytes": self.settings.snapshot_max_bytes,
+                "screenshot": self.settings.snapshot_screenshot_enabled,
+                "proof_mode": self.settings.snapshot_proof_mode,
+            }
+            return SnapshotProviderConfig(
+                provider_name=provider_name,
+                timeout_seconds=self.settings.playwright_mcp_timeout_seconds,
+                user_agent=self.settings.snapshot_user_agent,
+                flags=flags,
+            )
+
+        def snapshot_request_options(config: SnapshotProviderConfig) -> dict:
             return {
-                "digest": snapshot.digest_json,
-                "extracted": snapshot.extracted_json,
-                "metadata": snapshot.metadata,
-                "html_excerpt": html_excerpt,
+                "provider": config.provider_name,
+                "timeout_seconds": config.timeout_seconds,
+                "user_agent": config.user_agent,
+                "flags": config.flags,
             }
 
-        def snapshot_request_options() -> dict:
-            return {
-                "provider": self.settings.snapshot_provider,
-                "timeout_seconds": self.settings.playwright_mcp_timeout_seconds,
-                "screenshot": self.settings.snapshot_screenshot_enabled,
-                "max_bytes": self.settings.snapshot_max_bytes,
-                "user_agent": self.settings.snapshot_user_agent,
-            }
+        def snapshot_repository(product_id: uuid.UUID) -> SqlSnapshotRepository:
+            return SqlSnapshotRepository(
+                session=self.session,
+                default_product_id=product_id,
+                run_id=run.id,
+            )
+
+        def snapshot_artifact_store() -> SnapshotArtifactStore:
+            if self.snapshot_artifact_store is not None:
+                return self.snapshot_artifact_store
+            return InMemoryArtifactStore()
+
+        def capture_snapshot(
+            url: str,
+            product_id: uuid.UUID,
+            config: SnapshotProviderConfig,
+        ):
+            snapshot = capture_page(
+                url=url,
+                context=SnapshotContext(run_id=run.id),
+                provider_config=config,
+                provider=self.snapshot_provider,
+                repository=snapshot_repository(product_id),
+                artifact_store=snapshot_artifact_store(),
+            )
+            if snapshot.status == SnapshotStatus.error:
+                raise SnapshotCaptureError(
+                    "snapshot_capture_error",
+                    {"url": url, "errors": snapshot.errors_json},
+                )
+            return snapshot
 
         try:
             phase = PhaseNameV1.source_snapshot_capture
-            snapshot = self.snapshot_provider.capture(
-                config.source_url or "https://example.com/source"
-            )
+            source_url = config.source_url or "https://example.com/source"
+            product_row = get_or_create_product("UNKNOWN", "UNKNOWN", source_url)
+            provider_config = snapshot_provider_config()
+            snapshot = capture_snapshot(source_url, product_row.id, provider_config)
             source_product = resolve_product(snapshot)
-            product_row = get_or_create_product(
-                source_product.brand,
-                source_product.model,
-                snapshot.url_final,
-            )
-            snapshot_row = get_or_create_snapshot(
-                product_row.id,
-                snapshot.url_final,
-                snapshot_payload(snapshot),
-            )
+            if product_row.brand == "UNKNOWN" and source_product.brand != "UNKNOWN":
+                product_row.brand = source_product.brand
+            if product_row.model == "UNKNOWN" and source_product.model != "UNKNOWN":
+                product_row.model = source_product.model
+            if product_row.source_url is None:
+                product_row.source_url = snapshot.final_url
+            self.session.commit()
             self.recorder.add_tool_run(
                 run.id,
                 "snapshot_capture",
-                "ok",
+                "ok" if snapshot.status != SnapshotStatus.error else "error",
                 input_json={
-                    "url": snapshot.requested_url,
-                    "url_final": snapshot.url_final,
-                    "options": snapshot_request_options(),
+                    "url": source_url,
+                    "url_final": snapshot.final_url,
+                    "options": snapshot_request_options(provider_config),
                 },
                 output_json={
-                    "snapshot_id": str(snapshot_row.id),
-                    "status_code": snapshot.status_code,
-                    "metadata": snapshot.metadata,
+                    "snapshot_id": str(snapshot.id),
+                    "status_code": snapshot.http_status,
+                    "extraction_method": snapshot.extraction_method.value,
+                    "extraction_status": snapshot.status.value,
+                    "digest_hash": snapshot.digest_hash,
+                    "content_ref": snapshot.content_ref,
                 },
             )
             record_phase(phase, "ok")
@@ -257,27 +287,29 @@ class AgentRunner:
                     candidate_digest.source_url,
                 )
                 record_candidate(product_row.id, candidate)
-                candidate_snapshot = self.snapshot_provider.capture(
-                    candidate_digest.source_url or "https://example.com/c"
-                )
-                candidate_snapshot_row = get_or_create_snapshot(
+                candidate_url = candidate_digest.source_url or "https://example.com/c"
+                provider_config = snapshot_provider_config()
+                candidate_snapshot = capture_snapshot(
+                    candidate_url,
                     candidate_row.id,
-                    candidate_snapshot.url_final,
-                    snapshot_payload(candidate_snapshot),
+                    provider_config,
                 )
                 self.recorder.add_tool_run(
                     run.id,
                     "candidate_snapshot_capture",
-                    "ok",
+                    "ok" if candidate_snapshot.status != SnapshotStatus.error else "error",
                     input_json={
-                        "url": candidate_snapshot.requested_url,
-                        "url_final": candidate_snapshot.url_final,
-                        "options": snapshot_request_options(),
+                        "url": candidate_url,
+                        "url_final": candidate_snapshot.final_url,
+                        "options": snapshot_request_options(provider_config),
                     },
                     output_json={
-                        "snapshot_id": str(candidate_snapshot_row.id),
-                        "status_code": candidate_snapshot.status_code,
-                        "metadata": candidate_snapshot.metadata,
+                        "snapshot_id": str(candidate_snapshot.id),
+                        "status_code": candidate_snapshot.http_status,
+                        "extraction_method": candidate_snapshot.extraction_method.value,
+                        "extraction_status": candidate_snapshot.status.value,
+                        "digest_hash": candidate_snapshot.digest_hash,
+                        "content_ref": candidate_snapshot.content_ref,
                     },
                 )
             record_phase(phase, "ok")
@@ -398,7 +430,10 @@ class AgentRunner:
                 run.id,
                 tool_name,
                 "error",
-                input_json={"phase": phase.value, "options": snapshot_request_options()},
+                input_json={
+                    "phase": phase.value,
+                    "options": snapshot_request_options(snapshot_provider_config()),
+                },
                 output_json={"error": str(exc), "details": exc.details},
             )
             run.status = "error"

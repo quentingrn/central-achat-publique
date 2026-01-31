@@ -40,6 +40,10 @@ class DiscoveryCompareSettings(BaseSettings):
     snapshot_user_agent: str | None = Field(
         default=None, alias="DISCOVERY_COMPARE_SNAPSHOT_USER_AGENT"
     )
+    snapshot_proof_mode: str = Field(
+        default="off",
+        alias="DISCOVERY_COMPARE_SNAPSHOT_PROOF_MODE",
+    )
 
     product_candidate_provider: str = Field(
         default="stub", alias="DISCOVERY_COMPARE_PRODUCT_CANDIDATE_PROVIDER"

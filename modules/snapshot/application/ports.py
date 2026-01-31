@@ -37,10 +37,13 @@ class SnapshotProvider(Protocol):
 
 
 class SnapshotRepository(Protocol):
-    def append_snapshot(self, snapshot: PageSnapshotResult) -> uuid.UUID:
+    def append_snapshot(self, snapshot: PageSnapshotResult, run_id: uuid.UUID | None) -> uuid.UUID:
+        raise NotImplementedError
+
+    def find_by_run_id_url(self, run_id: uuid.UUID, url: str) -> PageSnapshotResult | None:
         raise NotImplementedError
 
 
 class SnapshotArtifactStore(Protocol):
-    def put(self, content_bytes: bytes, content_type: str | None) -> StoredArtifact:
+    def put_bytes(self, content_bytes: bytes, content_type: str | None) -> StoredArtifact:
         raise NotImplementedError

@@ -70,8 +70,8 @@ repo/
 ```
 
 ## Modules & responsabilites (liste + statut)
-- discovery_compare: actif (schemas v1 + AgentRunner + comparability gate deterministe + SnapshotProvider Playwright MCP + Exa MCP recall + debug run-centric)
-- snapshot: module contract-first (schemas + ports + facade capture_page minimal, non integre)
+- discovery_compare: actif (schemas v1 + AgentRunner + comparability gate deterministe + Exa MCP recall + run-centric debug; capture/extraction via module snapshot)
+- snapshot: module contract-first (schemas + ports + facade capture_page + extraction v1 JSON-LD→DOM→minimal + preuve minimale + providers http/playwright_mcp/browserbase placeholder, integre via discovery_compare)
 - ordering: placeholder
 - fulfillment_tracking: placeholder
 - customer_service: placeholder
@@ -95,7 +95,7 @@ Verrous techniques en place:
 
 ## Schema DB (tables + champs principaux)
 - products: id (uuid), brand, model, source_url, created_at, updated_at
-- page_snapshots: id (uuid), run_id, product_id, url, final_url, provider, http_status, captured_at, extraction_method, extraction_status, rules_version, content_ref, content_sha256, content_size_bytes, content_type, errors_json, missing_critical_json, digest_hash, extracted_json (jsonb: {digest, extracted, metadata, html_excerpt}), created_at, updated_at
+- page_snapshots: id (uuid), run_id, product_id, url, final_url, provider, http_status, captured_at, extraction_method, extraction_status, rules_version, content_ref, content_sha256, content_size_bytes, content_type, errors_json, missing_critical_json, digest_hash, extracted_json (jsonb: extraction v1 + digest), created_at, updated_at
 - comparable_candidates: id (uuid), product_id, candidate_url, signals_json (jsonb), created_at, updated_at
 - offers: id (uuid), product_id, offer_url, price_amount, price_currency, attributes_json (jsonb), created_at, updated_at
 - compare_runs: id (uuid), status, source_url, agent_version, created_at, updated_at
@@ -113,6 +113,88 @@ Verrous techniques en place:
 - GET /v1/debug/snapshots/{id}
 - GET /v1/debug/prompts/{id}
 
+## Functional flow (as-is)
+Flux reel declenche par `POST /v1/discovery/compare`.
+
+1) Point d’entree API
+- fichier: modules/discovery_compare/adapters/http/router.py
+- symbole: compare_stub()
+- reads: none
+- writes: none
+- notes: construit AgentRunner et renvoie `AgentRunOutputV1` via `output.model_dump()`; pas de schema d’entree (handler sans parametres), sortie conforme a `modules/discovery_compare/adapters/schemas/v1.py::AgentRunOutputV1`.
+
+2) Orchestration / run lifecycle
+- fichier: modules/discovery_compare/application/agent_runner.py
+- symbole: AgentRunner.run()
+- reads: prompts (via get_or_create_prompt)
+- writes: compare_runs (create_run), run_events (record_phase), llm_runs (add_llm_run), tool_runs (add_tool_run)
+- phases emises (PhaseNameV1): source_snapshot_capture → product_candidates_recall → candidate_snapshot_capture → comparability_gate → criteria_selection → product_comparison_build → offers_recall_and_fetch → offers_normalize_and_dedupe → final_response_assemble.
+
+3) Snapshot capture (source + candidats)
+- callsite: modules/discovery_compare/application/agent_runner.py
+- symbole: capture_snapshot() → modules/snapshot/application/facade.py::capture_page()
+- reads: page_snapshots (idempotence intra-run par (run_id, url) via `SqlSnapshotRepository.find_by_run_id_url`)
+- writes: page_snapshots (SqlSnapshotRepository.append_snapshot)
+- champs non-null par construction: url, final_url, provider, captured_at, extraction_method, extraction_status, extracted_json (inclut `digest`), digest_hash (toujours calcule par extract_structured_v1).
+- champs potentiellement NULL: http_status, content_ref, errors_json, missing_critical_json, rules_version.
+- content_sha256/content_size_bytes: renseignes si `captured.content_bytes` est present (independant du mode proof).
+- content_type: utilise `captured.content_type` si fourni, sinon fallback "text/html; charset=utf-8".
+- preuve brute: `content_ref` renseigne uniquement si `DISCOVERY_COMPARE_SNAPSHOT_PROOF_MODE` vaut `debug` ou `audit` (flag `SnapshotProviderConfig.flags["proof_mode"]`), sinon reste NULL.
+- notes: si `context.run_id` est absent, aucune idempotence intra-run n’est appliquee (nouvel INSERT).
+
+4) Product candidates recall (Exa MCP ou stub)
+- fichier: modules/discovery_compare/infrastructure/providers/exa_mcp.py
+- symbole: ExaMcpProductCandidateProvider.recall()
+- reads: none (hors config)
+- writes: none (DB)
+- tool_runs: `tool_name="exa_mcp_recall"` ajoute dans AgentRunner.run()
+- notes: en mode Exa MCP HTTP, l’appel passe par modules/discovery_compare/infrastructure/mcp_clients/exa.py::HttpExaMcpClient.search(); en mode stub, `StubProductCandidateProvider` est utilise dans `compare_stub()`.
+
+5) Comparability gate + ranking
+- fichier: modules/discovery_compare/domain/comparability.py
+- symbole: evaluate_comparability()
+- reads: none (in-memory)
+- writes: none (DB)
+- tool_runs: `tool_name="comparability_scoring"` ajoute dans AgentRunner.run()
+- llm_runs: `RunRecorder.add_llm_run()` enregistre prompt/schema/input/output (meme en mode stub).
+
+6) Sortie / assembly
+- fichier: modules/discovery_compare/application/agent_runner.py
+- symbole: AgentRunner.run() (assemblage AgentRunOutputV1)
+- reads: none
+- writes: compare_runs.status (passe a "completed")
+- IDs exposes: `run_id` est toujours present dans la reponse; les `snapshot_id` ne sont exposes que dans tool_runs (pas dans le payload AgentRunOutputV1).
+
+7) Debug endpoints (lecture Postgres uniquement)
+- fichier: modules/discovery_compare/adapters/http/debug_router.py
+- symboles:
+  - get_compare_run(): reads compare_runs + run_events
+  - get_llm_run(): reads llm_runs
+  - get_tool_run(): reads tool_runs
+  - get_snapshot(): reads page_snapshots (retourne uniquement id, product_id, url, extracted_json, created_at, updated_at)
+  - get_prompt(): reads prompts
+- guard: apps/api/guards.py::require_debug_access (404 si DEBUG_API_ENABLED=0, 403 si token manquant/incorrect, header attendu: X-Debug-Token)
+- notes: aucun endpoint debug ne lit directement des artefacts (MinIO/FS); tout vient de Postgres (aucun resolver de content_ref dans le code debug).
+
+## Module boundaries (as-is)
+- discovery_compare
+  - responsabilites: orchestration run (phases), comparability gate deterministe, LLM validation locale, emission run_events/tool_runs/llm_runs, integration providers (Exa MCP, snapshot via module snapshot), assembly AgentRunOutputV1.
+  - points d’entree: modules/discovery_compare/adapters/http/router.py::compare_stub(); modules/discovery_compare/application/agent_runner.py::AgentRunner.run(); modules/discovery_compare/adapters/http/debug_router.py::*.
+  - tables touchees: compare_runs, run_events, tool_runs, llm_runs, prompts, products, comparable_candidates, page_snapshots.
+  - dependances externes: Exa MCP HTTP (modules/discovery_compare/infrastructure/mcp_clients/exa.py); snapshot providers via module snapshot (Playwright MCP/HTTP/Browserbase selon config).
+
+- snapshot
+  - responsabilites: capture page, extraction deterministe v1, digest v1, persistance snapshot, selection provider.
+  - facade: modules/snapshot/application/facade.py::capture_page()
+  - factory providers: modules/snapshot/infrastructure/providers/factory.py::build_snapshot_provider()
+  - providers: HttpSnapshotProvider (httpx), PlaywrightMcpSnapshotProvider (MCP), BrowserbaseSnapshotProvider (placeholder), StubSnapshotProvider (tests/CI).
+  - tables touchees: page_snapshots (via SqlSnapshotRepository).
+  - artefacts: modules/snapshot/infrastructure/artifacts/local_store.py::LocalArtifactStore (FS local) + InMemoryArtifactStore (tests/CI); usage conditionnee par `proof_mode` (debug/audit). Aucun endpoint debug ne resolve ces artefacts as-is.
+
+- ordering / fulfillment_tracking / customer_service / accounts / claims
+  - statut: placeholder
+  - notes: aucun code execute, aucun acces DB.
+
 ## Commandes utiles (start/test/format/db_reset/db_migrate)
 - Start: ./scripts/start.sh (POSTGRES_PORT et API_PORT configurables)
 - Test: ./scripts/test.sh
@@ -125,8 +207,9 @@ Verrous techniques en place:
 - Env local: .env.local (dev uniquement, jamais committe, ignore via .gitignore)
 - Priorite env: process env > .env.local > .env > defaults (settings)
 - Env LLM: MISTRAL_API_KEY, MISTRAL_MODEL, DISCOVERY_COMPARE_LLM_ENABLED, DISCOVERY_COMPARE_AGENT_VERSION_MODE, DISCOVERY_COMPARE_LLM_TIMEOUT_SECONDS
-- Env Snapshots: DISCOVERY_COMPARE_SNAPSHOT_PROVIDER, DISCOVERY_COMPARE_SNAPSHOT_REQUIRE, PLAYWRIGHT_MCP_MODE, PLAYWRIGHT_MCP_COMMAND, PLAYWRIGHT_MCP_ARGS, PLAYWRIGHT_MCP_CWD, PLAYWRIGHT_MCP_URL, PLAYWRIGHT_MCP_TIMEOUT_SECONDS, PLAYWRIGHT_MCP_INSTALL, DISCOVERY_COMPARE_SNAPSHOT_SCREENSHOT_ENABLED, DISCOVERY_COMPARE_SNAPSHOT_MAX_BYTES, DISCOVERY_COMPARE_SNAPSHOT_USER_AGENT
+- Env Snapshots: DISCOVERY_COMPARE_SNAPSHOT_PROVIDER, DISCOVERY_COMPARE_SNAPSHOT_REQUIRE, PLAYWRIGHT_MCP_MODE, PLAYWRIGHT_MCP_COMMAND, PLAYWRIGHT_MCP_ARGS, PLAYWRIGHT_MCP_CWD, PLAYWRIGHT_MCP_URL, PLAYWRIGHT_MCP_TIMEOUT_SECONDS, PLAYWRIGHT_MCP_INSTALL, DISCOVERY_COMPARE_SNAPSHOT_SCREENSHOT_ENABLED, DISCOVERY_COMPARE_SNAPSHOT_MAX_BYTES, DISCOVERY_COMPARE_SNAPSHOT_USER_AGENT, DISCOVERY_COMPARE_SNAPSHOT_PROOF_MODE, BROWSERBASE_API_KEY, BROWSERBASE_TIMEOUT_SECONDS, BROWSERBASE_PROJECT_ID
 - Env Exa MCP: DISCOVERY_COMPARE_PRODUCT_CANDIDATE_PROVIDER, EXA_API_KEY, EXA_MCP_URL, EXA_MCP_TIMEOUT_SECONDS, EXA_MCP_LIMIT
+- Env Debug API: DEBUG_API_ENABLED, DEBUG_API_TOKEN
 
 ## Etat des PRs (checklist)
 As-is uniquement : aucune entree "a venir".
@@ -140,6 +223,12 @@ As-is uniquement : aucune entree "a venir".
 - PR7: ProductCandidateProvider Exa MCP + tool_runs exa_mcp_recall + tests mockes OK
 - PR8: module snapshot (schemas + ports + facade capture_page minimal) OK
 - PR9: alignement DB page_snapshots (colonnes snapshot + indexes) OK
+- PR10: preuve minimale snapshot (artefact + content_sha256/size/type + content_ref) OK
+- PR11: extraction v1 JSON-LD→DOM→minimal + digest v1 + tests fixtures OK
+- PR12: providers snapshot http/playwright_mcp + browserbase placeholder + factory OK
+- PR13: discovery_compare integre sur snapshot.capture_page (callsites remplaces, sans changement API) OK
+- PR14: snapshot append-only (url non unique) + preuve brute opt-in + idempotence intra-run OK
+- PR15: debug access guard (deny-by-default + token header) OK
 
 ## Decisions & Rationale (datees)
 - 2026-01-29: Choix PostgreSQL + Alembic (source unique de verite) avec drift guard bloquant par defaut.
@@ -163,6 +252,14 @@ As-is uniquement : aucune entree "a venir".
 - 2026-01-30: Support EXA_API_KEY (query + header) pour Exa MCP HTTP; tool_runs gardent la presence/absence de la cle.
 - 2026-01-30: Creation du module snapshot (contract-first) avec facade capture_page minimal et stubs tests, sans integration cross-module.
 - 2026-01-30: Alignement DB page_snapshots (colonnes snapshot + indexes digest_hash/run_id/url+captured_at) via migration additive.
+- 2026-01-30: Preuve brute snapshot opt-in (debug/audit) ; en nominal on persiste extraction+digest + hashes sans contenu brut.
+- 2026-01-30: Extraction snapshot v1 deterministe (JSON-LD -> DOM -> minimal) avec digest v1 et erreurs structurees.
+- 2026-01-30: Ruff exclut alembic/versions/ et .venv/ pour eviter la reformatation des migrations immuables et du venv.
+- 2026-01-30: discovery_compare utilise snapshot.capture_page pour capture/extraction/persistance (contract-first) sans changer le contrat API.
+- 2026-01-30: .gitignore exclut __pycache__/ et *.py[cod] (bytecode Python).
+- 2026-01-30: check_migrations_immutable ignore alembic/versions/__pycache__ (bytecode non pertinent).
 - 2026-01-30: Support .env.local (dev only) avec priorite explicite sur .env; .env.local ignore par git et tests unitaires couvrent presence/absence et priorite.
+- 2026-01-30: Suppression de la contrainte unique sur page_snapshots.url ; idempotence uniquement intra-run (run_id+url).
+- 2026-01-30: Debug API deny-by-default (404) + token `X-Debug-Token` requis si DEBUG_API_ENABLED=1 (403 sinon).
 - 2026-01-29: `strategy.md` est réservé à ChatGPT (mise à jour uniquement sur demande explicite de l’utilisateur).
 - 2026-01-29: Les stratégies spécifiques par module, si nécessaires, doivent être dérivées de `strategy.md` sans créer de dépendance inverse ni contredire la gouvernance documentaire (statut et périmètre explicités).

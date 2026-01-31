@@ -5,11 +5,10 @@ from modules.discovery_compare.application.llm_runtime import StubLlmClient
 from modules.discovery_compare.application.settings import get_discovery_compare_settings
 from modules.discovery_compare.infrastructure.providers import (
     ExaMcpProductCandidateProvider,
-    PlaywrightMcpSnapshotProvider,
     StubOfferCandidateProvider,
     StubProductCandidateProvider,
-    StubSnapshotProvider,
 )
+from modules.snapshot.infrastructure.providers.stubs import StubSnapshotProvider
 from shared.db.session import get_session
 
 router = APIRouter(prefix="/v1/discovery", tags=["discovery_compare"])
@@ -20,12 +19,9 @@ def compare_stub() -> dict:
     settings = get_discovery_compare_settings()
     session = get_session()
     try:
+        snapshot_provider = None
         if settings.snapshot_provider == "stub":
             snapshot_provider = StubSnapshotProvider()
-        elif settings.snapshot_provider == "playwright":
-            snapshot_provider = PlaywrightMcpSnapshotProvider(settings)
-        else:
-            raise RuntimeError(f"Unknown snapshot provider: {settings.snapshot_provider}")
         if settings.product_candidate_provider == "stub":
             product_candidate_provider = StubProductCandidateProvider()
         elif settings.product_candidate_provider == "exa":

@@ -33,7 +33,7 @@ class PageSnapshot(Base):
     product_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("products.id"), nullable=False
     )
-    url: Mapped[str] = mapped_column(String(2048), unique=True, nullable=False)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
     final_url: Mapped[str | None] = mapped_column(String(2048))
     provider: Mapped[str | None] = mapped_column(String(128))
     http_status: Mapped[int | None] = mapped_column(Integer)

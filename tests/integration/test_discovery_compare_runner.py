@@ -5,15 +5,13 @@ from fastapi.testclient import TestClient
 
 from apps.api.main import app
 from modules.discovery_compare.infrastructure.mcp_clients.exa import ExaSearchResponse
-from modules.discovery_compare.infrastructure.mcp_clients.playwright import (
-    PlaywrightCaptureResponse,
-)
 from modules.discovery_compare.infrastructure.persistence.models import (
     CompareRun,
     LlmRun,
     PageSnapshot,
     ToolRun,
 )
+from modules.snapshot.infrastructure.mcp_clients.playwright import PlaywrightCaptureResponse
 from shared.db.session import get_session
 from tests.integration.db_utils import db_available
 
@@ -27,7 +25,7 @@ def test_full_run_creates_nine_events(monkeypatch: pytest.MonkeyPatch) -> None:
     <html>
       <head>
         <script type="application/ld+json">
-          {"@context":"https://schema.org","@type":"Product","brand":{"@type":"Brand","name":"ACME"},"model":"X1"}
+          {"@context":"https://schema.org","@type":"Product","name":"ACME X1","brand":{"@type":"Brand","name":"ACME"},"model":"X1"}
         </script>
       </head>
       <body>fixture</body>
@@ -40,8 +38,7 @@ def test_full_run_creates_nine_events(monkeypatch: pytest.MonkeyPatch) -> None:
             status_code=200,
             html=html,
             metadata={"mock": True},
-            screenshot_base64=None,
-            user_agent=request.user_agent,
+            content_type="text/html; charset=utf-8",
         )
 
     monkeypatch.setenv("DISCOVERY_COMPARE_SNAPSHOT_PROVIDER", "playwright")
@@ -49,8 +46,10 @@ def test_full_run_creates_nine_events(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PLAYWRIGHT_MCP_URL", "http://mock-playwright")
     monkeypatch.setenv("EXA_MCP_URL", "http://mock-exa")
     monkeypatch.setenv("EXA_API_KEY", "fake-key")
+    monkeypatch.setenv("DEBUG_API_ENABLED", "1")
+    monkeypatch.setenv("DEBUG_API_TOKEN", "secret")
     monkeypatch.setattr(
-        "modules.discovery_compare.infrastructure.mcp_clients.playwright.HttpPlaywrightMcpClient.capture",
+        "modules.snapshot.infrastructure.mcp_clients.playwright.HttpPlaywrightMcpClient.capture",
         fake_capture,
     )
 
@@ -90,7 +89,10 @@ def test_full_run_creates_nine_events(monkeypatch: pytest.MonkeyPatch) -> None:
     assert fairness["diversity_score"] is not None
     assert payload["diagnostics"]["agent_version"]
 
-    debug_response = client.get(f"/v1/debug/compare-runs/{run_id}")
+    debug_response = client.get(
+        f"/v1/debug/compare-runs/{run_id}",
+        headers={"X-Debug-Token": "secret"},
+    )
     assert debug_response.status_code == 200
     debug_payload = debug_response.json()
     assert len(debug_payload["events"]) == 9
@@ -120,6 +122,8 @@ def test_full_run_creates_nine_events(monkeypatch: pytest.MonkeyPatch) -> None:
         for tool in snapshot_tools:
             assert tool.input_json
             assert tool.output_json
+            assert tool.output_json.get("snapshot_id")
+            assert tool.output_json.get("extraction_method")
 
         llm_run = (
             session.query(LlmRun)
