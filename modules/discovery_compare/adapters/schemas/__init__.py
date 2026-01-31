@@ -1,3 +1,11 @@
+from modules.discovery_compare.adapters.schemas.debug_candidate_judge_v1 import (
+    CandidateJudgeRequestV1,
+    CandidateJudgeResponseV1,
+    CandidateJudgeResultV1,
+    HardFilterResultV1,
+    JudgeVerdictV1,
+    ProductDigestInputV1,
+)
 from modules.discovery_compare.adapters.schemas.debug_exa_recall_v1 import (
     ExaRecallRequestV1,
     ExaRecallResponseV1,
@@ -60,4 +68,10 @@ __all__ = [
     "ExaRecallRequestV1",
     "ExaResultItemV1",
     "ExaRecallResponseV1",
+    "ProductDigestInputV1",
+    "HardFilterResultV1",
+    "JudgeVerdictV1",
+    "CandidateJudgeResultV1",
+    "CandidateJudgeRequestV1",
+    "CandidateJudgeResponseV1",
 ]

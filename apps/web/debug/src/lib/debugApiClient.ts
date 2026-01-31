@@ -151,3 +151,50 @@ export async function recallExa(payload: ExaRecallRequest) {
   }
   return response.json();
 }
+
+export type CandidateJudgeRequest = {
+  source: {
+    snapshot_id?: string | null;
+    url?: string | null;
+    digest_v1?: Record<string, unknown> | null;
+    extraction_v1?: Record<string, unknown> | null;
+    label?: string | null;
+  };
+  candidates: Array<{
+    snapshot_id?: string | null;
+    url?: string | null;
+    digest_v1?: Record<string, unknown> | null;
+    extraction_v1?: Record<string, unknown> | null;
+    label?: string | null;
+  }>;
+  ranking_top_k?: number;
+  mode?: string | null;
+  notes?: string | null;
+};
+
+export async function judgeCandidates(payload: CandidateJudgeRequest) {
+  const response = await fetch(buildUrl("/v1/debug/judge/candidates"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Debug-Token": token,
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = await response.text();
+    }
+    const error: ApiError = {
+      kind: "api",
+      status: response.status,
+      message: response.statusText || "API error",
+      body,
+    };
+    throw error;
+  }
+  return response.json();
+}

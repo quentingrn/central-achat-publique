@@ -131,6 +131,18 @@ export type DebugRecallSummary = {
   errors?: Record<string, unknown>[];
 };
 
+export type DebugCandidateJudgeSummary = {
+  sourceSnapshotId?: string | null;
+  total: number;
+  yesCount: number;
+  noCount: number;
+  indeterminateCount: number;
+  rankedTopK: Array<{ index: number; snapshotId?: string | null; score?: number | null }>;
+  hardFilters: Record<string, number>;
+  missingCriticalTop: Record<string, number>;
+  errors?: Record<string, unknown>[];
+};
+
 export function buildChatGptSummary(summary: DebugSummary): string {
   const lines: string[] = [];
   lines.push("Debug summary (condensed)");
@@ -331,6 +343,52 @@ export function buildChatGptRecallSummary(summary: DebugRecallSummary): string {
       const score =
         typeof item.score === "number" ? ` (${item.score.toFixed(3)})` : "";
       lines.push(`- ${item.domain ?? "unknown"}: ${item.title ?? item.url}${score}`);
+    });
+  }
+  if (summary.errors && summary.errors.length) {
+    lines.push("errors:");
+    summary.errors.slice(0, 5).forEach((error) => {
+      const message = typeof error["message"] === "string" ? error["message"] : "error";
+      lines.push(`- ${message}`);
+    });
+  }
+  return lines.join("\n");
+}
+
+export function buildChatGptCandidateJudgeSummary(
+  summary: DebugCandidateJudgeSummary
+): string {
+  const lines: string[] = [];
+  lines.push("Candidate judge summary (condensed)");
+  if (summary.sourceSnapshotId) {
+    lines.push(`source_snapshot_id: ${summary.sourceSnapshotId}`);
+  }
+  lines.push(`candidates: ${summary.total}`);
+  lines.push(
+    `verdicts: yes=${summary.yesCount} no=${summary.noCount} indeterminate=${summary.indeterminateCount}`
+  );
+  if (summary.rankedTopK.length) {
+    lines.push("top_k:");
+    summary.rankedTopK.slice(0, 5).forEach((item) => {
+      lines.push(
+        `- idx=${item.index} snapshot_id=${item.snapshotId ?? "n/a"} score=${
+          item.score ?? "n/a"
+        }`
+      );
+    });
+  }
+  const hardFilterEntries = Object.entries(summary.hardFilters);
+  if (hardFilterEntries.length) {
+    lines.push("hard_filters:");
+    hardFilterEntries.slice(0, 5).forEach(([reason, count]) => {
+      lines.push(`- ${reason}: ${count}`);
+    });
+  }
+  const missingEntries = Object.entries(summary.missingCriticalTop);
+  if (missingEntries.length) {
+    lines.push("missing_critical:");
+    missingEntries.slice(0, 5).forEach(([reason, count]) => {
+      lines.push(`- ${reason}: ${count}`);
     });
   }
   if (summary.errors && summary.errors.length) {

@@ -9,6 +9,7 @@ import {
   getCompareRunFull,
   getCompareRunSummary,
   getSnapshot,
+  judgeCandidates,
   listCompareRuns,
   listSnapshotsByUrl,
   recallExa,
@@ -16,11 +17,13 @@ import {
 import { normalizeError } from "./lib/normalizeError";
 import {
   buildChatGptDiffSummary,
+  buildChatGptCandidateJudgeSummary,
   buildChatGptRecallSummary,
   buildChatGptSnapshotSummary,
 } from "./lib/summary";
 import type {
   DebugDiffSummary,
+  DebugCandidateJudgeSummary,
   DebugRecallSummary,
   DebugSnapshotSummary,
   DebugSummary,
@@ -209,6 +212,46 @@ type ExaRecallResponse = {
   metrics: Record<string, unknown>;
 };
 
+type JudgeVerdict = "yes" | "no" | "indeterminate";
+
+type HardFilterResult = {
+  passed: boolean;
+  reason_code: string;
+  details?: Record<string, unknown> | null;
+};
+
+type CandidateJudgeResult = {
+  candidate_index: number;
+  candidate_snapshot_id?: string | null;
+  candidate_url?: string | null;
+  verdict: JudgeVerdict;
+  comparability_score?: number | null;
+  coverage_score?: number | null;
+  identity_strength?: number | null;
+  final_score?: number | null;
+  hard_filters: HardFilterResult[];
+  reasons_short: string[];
+  signals_used: string[];
+  missing_critical: string[];
+  breakdown: Record<string, unknown>;
+  errors: Record<string, unknown>[];
+};
+
+type CandidateJudgeResponse = {
+  request: {
+    source: {
+      snapshot_id?: string | null;
+    };
+    candidates: Array<{ snapshot_id?: string | null }>;
+    ranking_top_k?: number;
+  };
+  source_snapshot_id?: string | null;
+  results: CandidateJudgeResult[];
+  ranked_top_k: number[];
+  metrics: Record<string, unknown>;
+  raw?: Record<string, unknown> | null;
+};
+
 const buildRecallStorageKey = (request: ExaRecallRequest) => {
   const normalized = {
     query: request.query,
@@ -288,6 +331,10 @@ export default function App() {
     Record<string, { label: string; reason: string }>
   >({});
   const [recallExport, setRecallExport] = useState<Record<string, unknown> | null>(null);
+  const [judgeSourceId, setJudgeSourceId] = useState("");
+  const [judgeCandidateIds, setJudgeCandidateIds] = useState("");
+  const [judgeTopK, setJudgeTopK] = useState(5);
+  const [judgeResponse, setJudgeResponse] = useState<CandidateJudgeResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<ReturnType<typeof normalizeError>[]>([]);
 
@@ -365,6 +412,48 @@ export default function App() {
       errors: recallResponse.errors,
     } as DebugRecallSummary);
   }, [recallResponse]);
+
+  const judgeSummaryText = useMemo(() => {
+    if (!judgeResponse) {
+      return null;
+    }
+    const hardFilterCounts: Record<string, number> = {};
+    const missingCounts: Record<string, number> = {};
+    const errors: Record<string, unknown>[] = [];
+    judgeResponse.results.forEach((result) => {
+      result.hard_filters.forEach((filter) => {
+        if (!filter.passed) {
+          hardFilterCounts[filter.reason_code] =
+            (hardFilterCounts[filter.reason_code] ?? 0) + 1;
+        }
+      });
+      result.missing_critical.forEach((item) => {
+        missingCounts[item] = (missingCounts[item] ?? 0) + 1;
+      });
+      result.errors.forEach((error) => errors.push(error));
+    });
+
+    const rankedTopK = judgeResponse.ranked_top_k.map((index) => {
+      const result = judgeResponse.results[index];
+      return {
+        index,
+        snapshotId: result?.candidate_snapshot_id ?? null,
+        score: result?.final_score ?? null,
+      };
+    });
+
+    return buildChatGptCandidateJudgeSummary({
+      sourceSnapshotId: judgeResponse.source_snapshot_id,
+      total: judgeResponse.results.length,
+      yesCount: Number(judgeResponse.metrics?.["yes_count"] ?? 0),
+      noCount: Number(judgeResponse.metrics?.["no_count"] ?? 0),
+      indeterminateCount: Number(judgeResponse.metrics?.["indeterminate_count"] ?? 0),
+      rankedTopK,
+      hardFilters: hardFilterCounts,
+      missingCriticalTop: missingCounts,
+      errors,
+    } as DebugCandidateJudgeSummary);
+  }, [judgeResponse]);
 
   const recallDuplicateUrls = useMemo(() => {
     if (!recallResponse) {
@@ -609,6 +698,42 @@ export default function App() {
       request: recallResponse.request,
       annotations: recallAnnotations,
     });
+  };
+
+  const parseSnapshotIds = (value: string) =>
+    value
+      .split(/[\n,]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, 20);
+
+  const runCandidateJudge = async () => {
+    const sourceId = judgeSourceId.trim();
+    const candidates = parseSnapshotIds(judgeCandidateIds);
+    if (!sourceId) {
+      setErrors([normalizeError(new Error("Provide source_snapshot_id."))]);
+      return;
+    }
+    if (!candidates.length) {
+      setErrors([normalizeError(new Error("Provide at least one candidate snapshot_id."))]);
+      return;
+    }
+    setLoading(true);
+    setErrors([]);
+    try {
+      const payload = {
+        source: { snapshot_id: sourceId, label: "source" },
+        candidates: candidates.map((id) => ({ snapshot_id: id, label: "candidate" })),
+        ranking_top_k: Math.min(10, Math.max(1, judgeTopK)),
+      };
+      const data = await judgeCandidates(payload);
+      setJudgeResponse(data as CandidateJudgeResponse);
+    } catch (error) {
+      setErrors([normalizeError(error)]);
+      setJudgeResponse(null);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -1482,9 +1607,148 @@ export default function App() {
             </section>
           ) : null}
 
+          {activeTab === "Candidate Judge" ? (
+            <section className="space-y-6">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <div className="text-2xl font-semibold">Candidate Judge</div>
+                  <div className="text-xs text-slate-400">
+                    Judge comparability + ranking from snapshot digests only.
+                  </div>
+                </div>
+                <CopyForChatgptButton textOverride={judgeSummaryText ?? undefined} />
+              </div>
+
+              <section className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+                <div className="text-sm font-semibold text-slate-200">Inputs</div>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <label className="flex flex-col gap-2 text-xs text-slate-300">
+                    <span className="text-[11px] uppercase text-slate-500">source_snapshot_id</span>
+                    <input
+                      value={judgeSourceId}
+                      onChange={(event) => setJudgeSourceId(event.target.value)}
+                      placeholder="uuid"
+                      className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-2 text-xs text-slate-300">
+                    <span className="text-[11px] uppercase text-slate-500">top_k</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={10}
+                      value={judgeTopK}
+                      onChange={(event) => setJudgeTopK(Number(event.target.value))}
+                      className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100"
+                    />
+                  </label>
+                </div>
+                <label className="mt-3 flex flex-col gap-2 text-xs text-slate-300">
+                  <span className="text-[11px] uppercase text-slate-500">
+                    candidate_snapshot_ids (one per line)
+                  </span>
+                  <textarea
+                    value={judgeCandidateIds}
+                    onChange={(event) => setJudgeCandidateIds(event.target.value)}
+                    placeholder="uuid-1\nuuid-2\nuuid-3"
+                    className="min-h-[120px] rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100"
+                  />
+                </label>
+                <div className="mt-3">
+                  <button
+                    onClick={runCandidateJudge}
+                    className="rounded-md bg-slate-200 px-3 py-2 text-xs font-semibold text-slate-900"
+                    type="button"
+                    disabled={loading}
+                  >
+                    Evaluer
+                  </button>
+                </div>
+              </section>
+
+              {judgeResponse ? (
+                <section className="space-y-4">
+                  <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4 text-xs text-slate-300">
+                    <div className="flex flex-wrap gap-4">
+                      <span>source_snapshot_id: {judgeResponse.source_snapshot_id ?? "n/a"}</span>
+                      <span>yes: {judgeResponse.metrics?.["yes_count"] ?? 0}</span>
+                      <span>no: {judgeResponse.metrics?.["no_count"] ?? 0}</span>
+                      <span>
+                        indeterminate: {judgeResponse.metrics?.["indeterminate_count"] ?? 0}
+                      </span>
+                      <span>avg_score: {judgeResponse.metrics?.["avg_score"] ?? "n/a"}</span>
+                    </div>
+                    {judgeResponse.ranked_top_k.length ? (
+                      <div className="mt-2 text-[11px] text-slate-200">
+                        top_k: {judgeResponse.ranked_top_k.join(", ")}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+                    <div className="text-xs uppercase text-slate-400">Candidates</div>
+                    <div className="mt-3 space-y-3">
+                      {judgeResponse.results.map((result) => (
+                        <div
+                          key={`judge-${result.candidate_index}`}
+                          className="rounded-md border border-slate-800 bg-slate-950/60 px-3 py-3 text-xs text-slate-300"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="text-slate-100">
+                              #{result.candidate_index}{" "}
+                              {result.candidate_snapshot_id ?? result.candidate_url ?? "candidate"}
+                            </div>
+                            <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] text-slate-200">
+                              {result.verdict}
+                            </span>
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-slate-400">
+                            <span>final_score: {result.final_score ?? "n/a"}</span>
+                            <span>comparability: {result.comparability_score ?? "n/a"}</span>
+                            <span>coverage: {result.coverage_score ?? "n/a"}</span>
+                            <span>identity: {result.identity_strength ?? "n/a"}</span>
+                          </div>
+                          {result.hard_filters.length ? (
+                            <div className="mt-2 text-[11px] text-red-300">
+                              hard_filters:{" "}
+                              {result.hard_filters.map((filter) => filter.reason_code).join(", ")}
+                            </div>
+                          ) : null}
+                          {result.missing_critical.length ? (
+                            <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-200">
+                              {result.missing_critical.map((item) => (
+                                <span
+                                  key={item}
+                                  className="rounded-full border border-slate-700 px-2 py-1"
+                                >
+                                  {item}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                          <FoldableJson
+                            title={`breakdown #${result.candidate_index}`}
+                            data={result.breakdown}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <FoldableJson title="judge_response (raw)" data={judgeResponse} />
+                </section>
+              ) : (
+                <section className="rounded-xl border border-dashed border-slate-800 bg-slate-900/20 p-6 text-sm text-slate-400">
+                  No judge results yet. Provide source and candidates, then evaluate.
+                </section>
+              )}
+            </section>
+          ) : null}
+
           {activeTab !== "Run Explorer" &&
           activeTab !== "Snapshot Inspector" &&
-          activeTab !== "Recall Lab (Exa)" ? (
+          activeTab !== "Recall Lab (Exa)" &&
+          activeTab !== "Candidate Judge" ? (
             <section className="rounded-xl border border-dashed border-slate-800 bg-slate-900/20 p-6 text-sm text-slate-400">
               {activeTab} is a placeholder. Use Run Explorer or Snapshot Inspector for now.
             </section>

@@ -7,6 +7,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, tuple_
 
 from apps.api.guards import require_debug_access
+from modules.discovery_compare.adapters.schemas.debug_candidate_judge_v1 import (
+    CandidateJudgeRequestV1,
+    CandidateJudgeResponseV1,
+    CandidateJudgeResultV1,
+    HardFilterResultV1,
+    JudgeVerdictV1,
+    ProductDigestInputV1,
+)
 from modules.discovery_compare.adapters.schemas.debug_exa_recall_v1 import (
     ExaRecallRequestV1,
     ExaRecallResponseV1,
@@ -30,8 +38,9 @@ from modules.discovery_compare.adapters.schemas.debug_run_v1 import (
     RunRefsV1,
     RunTimelineItemV1,
 )
-from modules.discovery_compare.adapters.schemas.v1 import PhaseNameV1
+from modules.discovery_compare.adapters.schemas.v1 import PhaseNameV1, ProductDigestV1
 from modules.discovery_compare.application.settings import get_discovery_compare_settings
+from modules.discovery_compare.domain import comparability as comparability_domain
 from modules.discovery_compare.infrastructure.mcp_clients.exa import (
     ExaMcpError,
     HttpExaMcpClient,
@@ -223,6 +232,113 @@ def _stub_exa_results(limit: int) -> list[dict]:
         },
     ]
     return base[: max(1, min(limit, len(base)))]
+
+
+def _missing_from_payload(payload: object | None) -> list[str]:
+    if isinstance(payload, dict):
+        value = payload.get("missing")
+        if isinstance(value, list):
+            return [str(item) for item in value]
+    if isinstance(payload, list):
+        return [str(item) for item in payload]
+    return []
+
+
+def _errors_from_payload(payload: object | None) -> list[dict]:
+    if isinstance(payload, dict):
+        value = payload.get("errors")
+        if isinstance(value, list):
+            return value
+        if payload:
+            return [payload]
+    if isinstance(payload, list):
+        return payload
+    return []
+
+
+def _build_digest_from_inputs(
+    url: str | None,
+    digest_v1: dict | None,
+    extraction_v1: dict | None,
+) -> ProductDigestV1 | None:
+    identity = {}
+    product = {}
+    if isinstance(digest_v1, dict):
+        identity = digest_v1.get("product_identity") or {}
+    if isinstance(extraction_v1, dict):
+        product = extraction_v1.get("product") or {}
+
+    brand = identity.get("brand") or product.get("brand") or "UNKNOWN"
+    model = identity.get("model") or product.get("model") or "UNKNOWN"
+    attributes: dict[str, str | int | float | bool | None] = {}
+    if isinstance(product, dict):
+        for key, value in product.items():
+            if key in {"brand", "model"}:
+                continue
+            attributes[key] = value
+
+    return ProductDigestV1(
+        brand=brand,
+        model=model,
+        source_url=url,
+        attributes=attributes,
+    )
+
+
+def _resolve_digest_input(
+    payload: ProductDigestInputV1,
+    session,
+) -> tuple[ProductDigestV1 | None, dict]:
+    errors: list[dict] = []
+    missing: list[str] = []
+    digest_v1 = payload.digest_v1
+    extraction_v1 = payload.extraction_v1
+    url = payload.url
+    snapshot_id = payload.snapshot_id
+
+    if snapshot_id:
+        try:
+            snapshot_uuid = uuid.UUID(snapshot_id)
+        except ValueError:
+            errors.append({"kind": "snapshot_id_invalid", "snapshot_id": snapshot_id})
+            snapshot_uuid = None
+        if snapshot_uuid:
+            snapshot = session.get(PageSnapshot, snapshot_uuid)
+            if snapshot is None:
+                errors.append({"kind": "snapshot_not_found", "snapshot_id": snapshot_id})
+            else:
+                if url is None:
+                    url = snapshot.final_url or snapshot.url
+                extracted = snapshot.extracted_json or {}
+                if extraction_v1 is None and isinstance(extracted, dict):
+                    if extracted.get("extraction_version") == "v1":
+                        extraction_v1 = extracted
+                if digest_v1 is None and isinstance(extracted, dict):
+                    digest_v1 = extracted.get("digest")
+                missing.extend(_missing_from_payload(snapshot.missing_critical_json))
+                errors.extend(_errors_from_payload(snapshot.errors_json))
+
+    if extraction_v1 and isinstance(extraction_v1, dict):
+        missing.extend(_missing_from_payload(extraction_v1.get("missing_critical")))
+        errors.extend(_errors_from_payload(extraction_v1.get("errors")))
+
+    if digest_v1 is None and extraction_v1 is None:
+        missing.append("digest_missing")
+        errors.append({"kind": "digest_missing", "message": "digest_v1 or extraction_v1 required"})
+        return None, {
+            "snapshot_id": snapshot_id,
+            "url": url,
+            "missing": missing,
+            "errors": errors,
+        }
+
+    digest = _build_digest_from_inputs(url, digest_v1, extraction_v1)
+    return digest, {
+        "snapshot_id": snapshot_id,
+        "url": url,
+        "missing": missing,
+        "errors": errors,
+    }
 
 
 def _duration_ms(run: CompareRun) -> int | None:
@@ -615,6 +731,147 @@ def debug_exa_recall(payload: ExaRecallRequestV1) -> ExaRecallResponseV1:
         errors=errors,
         metrics=metrics,
     )
+
+
+@router.post("/judge/candidates", response_model=CandidateJudgeResponseV1)
+def debug_candidate_judge(payload: CandidateJudgeRequestV1) -> CandidateJudgeResponseV1:
+    session = get_session()
+    try:
+        source_digest, source_meta = _resolve_digest_input(payload.source, session)
+        results: list[CandidateJudgeResultV1 | None] = [None] * len(payload.candidates)
+        ranked_indices: list[int] = []
+        scored_candidates = []
+        scored_meta: dict[uuid.UUID, dict] = {}
+
+        if source_digest is None:
+            for index, candidate in enumerate(payload.candidates):
+                _, meta = _resolve_digest_input(candidate, session)
+                errors = meta["errors"] + [
+                    {"kind": "source_missing", "message": "source digest missing"}
+                ]
+                results[index] = CandidateJudgeResultV1(
+                    candidate_index=index,
+                    candidate_snapshot_id=meta["snapshot_id"],
+                    candidate_url=meta["url"],
+                    verdict=JudgeVerdictV1.indeterminate,
+                    hard_filters=[],
+                    reasons_short=[],
+                    signals_used=[],
+                    missing_critical=meta["missing"],
+                    breakdown={},
+                    errors=errors,
+                )
+            return CandidateJudgeResponseV1(
+                request=payload,
+                source_snapshot_id=source_meta["snapshot_id"],
+                results=[result for result in results if result is not None],
+                ranked_top_k=[],
+                metrics={"limitations": ["source_missing"]},
+                raw=None,
+            )
+
+        for index, candidate in enumerate(payload.candidates):
+            digest, meta = _resolve_digest_input(candidate, session)
+            if digest is None:
+                results[index] = CandidateJudgeResultV1(
+                    candidate_index=index,
+                    candidate_snapshot_id=meta["snapshot_id"],
+                    candidate_url=meta["url"],
+                    verdict=JudgeVerdictV1.indeterminate,
+                    hard_filters=[],
+                    reasons_short=[],
+                    signals_used=[],
+                    missing_critical=meta["missing"],
+                    breakdown={},
+                    errors=meta["errors"],
+                )
+                continue
+
+            hard_reason = comparability_domain._hard_filter_reason(source_digest, digest)
+            if hard_reason:
+                results[index] = CandidateJudgeResultV1(
+                    candidate_index=index,
+                    candidate_snapshot_id=meta["snapshot_id"],
+                    candidate_url=meta["url"] or digest.source_url,
+                    verdict=JudgeVerdictV1.no,
+                    hard_filters=[
+                        HardFilterResultV1(
+                            passed=False,
+                            reason_code=hard_reason,
+                            details=None,
+                        )
+                    ],
+                    reasons_short=[hard_reason],
+                    signals_used=[],
+                    missing_critical=meta["missing"],
+                    breakdown={"hard_filter": hard_reason},
+                    errors=meta["errors"],
+                )
+                continue
+
+            scored = comparability_domain._score_candidate(source_digest, digest)
+            scored_candidates.append(scored)
+            scored_meta[scored.candidate.id] = {
+                "index": index,
+                "meta": meta,
+            }
+
+        if scored_candidates:
+            adjusted = comparability_domain._apply_diversity_penalty(scored_candidates)
+            ranked = comparability_domain._rank_candidates(adjusted)
+            for scored in adjusted:
+                meta_entry = scored_meta.get(scored.candidate.id)
+                if not meta_entry:
+                    continue
+                index = meta_entry["index"]
+                meta = meta_entry["meta"]
+                results[index] = CandidateJudgeResultV1(
+                    candidate_index=index,
+                    candidate_snapshot_id=meta["snapshot_id"],
+                    candidate_url=meta["url"] or scored.candidate.source_url,
+                    verdict=JudgeVerdictV1.yes,
+                    comparability_score=scored.comparability_score,
+                    coverage_score=scored.coverage_score,
+                    identity_strength=scored.identity_strength,
+                    final_score=scored.comparability_score,
+                    hard_filters=[],
+                    reasons_short=scored.reasons,
+                    signals_used=scored.signals,
+                    missing_critical=meta["missing"],
+                    breakdown={
+                        "reasons": scored.reasons,
+                        "diversity_penalty": scored.diversity_penalty,
+                    },
+                    errors=meta["errors"],
+                )
+
+            ranked_indices = [scored_meta[candidate.candidate.id]["index"] for candidate in ranked]
+
+        results_clean = [result for result in results if result is not None]
+        yes_count = sum(1 for result in results_clean if result.verdict == JudgeVerdictV1.yes)
+        no_count = sum(1 for result in results_clean if result.verdict == JudgeVerdictV1.no)
+        indeterminate_count = sum(
+            1 for result in results_clean if result.verdict == JudgeVerdictV1.indeterminate
+        )
+        scores = [result.final_score for result in results_clean if result.final_score is not None]
+        avg_score = round(sum(scores) / len(scores), 4) if scores else None
+        metrics = {
+            "yes_count": yes_count,
+            "no_count": no_count,
+            "indeterminate_count": indeterminate_count,
+            "avg_score": avg_score,
+        }
+
+        return CandidateJudgeResponseV1(
+            request=payload,
+            source_snapshot_id=source_meta["snapshot_id"],
+            results=results_clean,
+            ranked_top_k=ranked_indices[: payload.ranking_top_k],
+            metrics=metrics,
+            raw=None,
+        )
+    finally:
+        session.close()
 
 
 @router.get("/compare-runs/{run_id}")
