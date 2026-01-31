@@ -5,6 +5,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, tuple_
 
 from apps.api.guards import require_debug_access
+from modules.discovery_compare.adapters.schemas.debug_run_diff_v1 import (
+    CompareRunDiffResponseV1,
+    DiffSeverityV1,
+    RunCountsDiffV1,
+    RunErrorTopDiffV1,
+    RunFieldDiffV1,
+    RunPhaseDiffItemV1,
+    RunRefSetDiffV1,
+)
 from modules.discovery_compare.adapters.schemas.debug_run_v1 import (
     CompareRunListItemV1,
     CompareRunListResponseV1,
@@ -14,6 +23,7 @@ from modules.discovery_compare.adapters.schemas.debug_run_v1 import (
     RunRefsV1,
     RunTimelineItemV1,
 )
+from modules.discovery_compare.adapters.schemas.v1 import PhaseNameV1
 from modules.discovery_compare.infrastructure.persistence.models import (
     CompareRun,
     LlmRun,
@@ -33,6 +43,8 @@ router = APIRouter(
 _CURSOR_SEPARATOR = "|"
 _ERROR_STATUSES = {"error", "warning"}
 _PHASE_STATUS_KEYS = ("ok", "warning", "error", "skipped")
+_STATUS_SEVERITY = {"error": 3, "warning": 2, "ok": 1, "skipped": 0}
+_PHASE_ORDER = {phase.value: index for index, phase in enumerate(PhaseNameV1)}
 
 
 def _encode_cursor(created_at: datetime, run_id: uuid.UUID) -> str:
@@ -72,6 +84,46 @@ def _build_error_top(events: list[RunEvent]) -> dict[uuid.UUID, RunErrorTopV1]:
             message=event.message or "",
         )
     return error_top
+
+
+def _diff_severity(left: object | None, right: object | None) -> DiffSeverityV1:
+    if left == right:
+        return DiffSeverityV1.same
+    if left is None and right is not None:
+        return DiffSeverityV1.added
+    if left is not None and right is None:
+        return DiffSeverityV1.removed
+    return DiffSeverityV1.changed
+
+
+def _build_phase_index(events: list[RunEvent]) -> dict[str, RunEvent]:
+    phases: dict[str, RunEvent] = {}
+    for event in events:
+        current = phases.get(event.phase_name)
+        if current is None:
+            phases[event.phase_name] = event
+            continue
+        current_severity = _STATUS_SEVERITY.get(current.status, 0)
+        new_severity = _STATUS_SEVERITY.get(event.status, 0)
+        if new_severity > current_severity:
+            phases[event.phase_name] = event
+            continue
+        if new_severity == current_severity and event.created_at >= current.created_at:
+            phases[event.phase_name] = event
+    return phases
+
+
+def _build_ref_diff(left_ids: list[uuid.UUID], right_ids: list[uuid.UUID]) -> RunRefSetDiffV1:
+    left_set = {str(value) for value in left_ids}
+    right_set = {str(value) for value in right_ids}
+    added = sorted(right_set - left_set)
+    removed = sorted(left_set - right_set)
+    common_count = len(left_set & right_set)
+    return RunRefSetDiffV1(
+        added_ids=added,
+        removed_ids=removed,
+        common_count=common_count,
+    )
 
 
 def _duration_ms(run: CompareRun) -> int | None:
@@ -273,6 +325,159 @@ def get_compare_run_summary(run_id: str) -> CompareRunSummaryResponseV1:
         )
 
         return CompareRunSummaryResponseV1(item=item, timeline=timeline, refs=refs)
+    finally:
+        session.close()
+
+
+@router.get("/compare-runs:diff", response_model=CompareRunDiffResponseV1)
+def diff_compare_runs(
+    left_run_id: str | None = Query(default=None),
+    right_run_id: str | None = Query(default=None),
+    left: str | None = Query(default=None),
+    right: str | None = Query(default=None),
+) -> CompareRunDiffResponseV1:
+    left_id = left_run_id or left
+    right_id = right_run_id or right
+    if not left_id or not right_id:
+        raise HTTPException(status_code=400, detail="left_run_id and right_run_id required")
+
+    session = get_session()
+    try:
+        left_run = session.get(CompareRun, left_id)
+        right_run = session.get(CompareRun, right_id)
+        if left_run is None or right_run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+
+        left_events = (
+            session.query(RunEvent)
+            .filter(RunEvent.run_id == left_run.id)
+            .order_by(RunEvent.created_at.asc())
+            .all()
+        )
+        right_events = (
+            session.query(RunEvent)
+            .filter(RunEvent.run_id == right_run.id)
+            .order_by(RunEvent.created_at.asc())
+            .all()
+        )
+
+        left_phase_counts = _build_phase_counts(left_events).get(left_run.id, RunPhaseCountsV1())
+        right_phase_counts = _build_phase_counts(right_events).get(right_run.id, RunPhaseCountsV1())
+        phase_counts = RunCountsDiffV1(
+            left=left_phase_counts,
+            right=right_phase_counts,
+            severity=_diff_severity(left_phase_counts, right_phase_counts),
+        )
+
+        left_error_top = _build_error_top(left_events).get(left_run.id)
+        right_error_top = _build_error_top(right_events).get(right_run.id)
+        error_top = RunErrorTopDiffV1(
+            left=left_error_top,
+            right=right_error_top,
+            severity=_diff_severity(left_error_top, right_error_top),
+        )
+
+        left_index = _build_phase_index(left_events)
+        right_index = _build_phase_index(right_events)
+        phase_names = sorted(
+            set(left_index.keys()) | set(right_index.keys()),
+            key=lambda phase: (_PHASE_ORDER.get(phase, 999), phase),
+        )
+        timeline: list[RunPhaseDiffItemV1] = []
+        for phase_name in phase_names:
+            left_event = left_index.get(phase_name)
+            right_event = right_index.get(phase_name)
+            left_status = left_event.status if left_event else None
+            right_status = right_event.status if right_event else None
+            timeline.append(
+                RunPhaseDiffItemV1(
+                    phase_name=phase_name,
+                    left_status=left_status,
+                    right_status=right_status,
+                    severity=_diff_severity(left_status, right_status),
+                    left_message=left_event.message if left_event else None,
+                    right_message=right_event.message if right_event else None,
+                )
+            )
+
+        left_snapshot_ids = [
+            row[0]
+            for row in session.query(PageSnapshot.id)
+            .filter(PageSnapshot.run_id == left_run.id)
+            .all()
+        ]
+        right_snapshot_ids = [
+            row[0]
+            for row in session.query(PageSnapshot.id)
+            .filter(PageSnapshot.run_id == right_run.id)
+            .all()
+        ]
+        left_tool_run_ids = [
+            row[0] for row in session.query(ToolRun.id).filter(ToolRun.run_id == left_run.id).all()
+        ]
+        right_tool_run_ids = [
+            row[0] for row in session.query(ToolRun.id).filter(ToolRun.run_id == right_run.id).all()
+        ]
+        left_llm_run_ids = [
+            row[0] for row in session.query(LlmRun.id).filter(LlmRun.run_id == left_run.id).all()
+        ]
+        right_llm_run_ids = [
+            row[0] for row in session.query(LlmRun.id).filter(LlmRun.run_id == right_run.id).all()
+        ]
+        left_prompt_ids = [
+            row[0]
+            for row in session.query(func.distinct(LlmRun.prompt_id))
+            .filter(LlmRun.run_id == left_run.id)
+            .filter(LlmRun.prompt_id.isnot(None))
+            .all()
+        ]
+        right_prompt_ids = [
+            row[0]
+            for row in session.query(func.distinct(LlmRun.prompt_id))
+            .filter(LlmRun.run_id == right_run.id)
+            .filter(LlmRun.prompt_id.isnot(None))
+            .all()
+        ]
+
+        refs = {
+            "snapshots": _build_ref_diff(left_snapshot_ids, right_snapshot_ids),
+            "tool_runs": _build_ref_diff(left_tool_run_ids, right_tool_run_ids),
+            "llm_runs": _build_ref_diff(left_llm_run_ids, right_llm_run_ids),
+            "prompts": _build_ref_diff(left_prompt_ids, right_prompt_ids),
+        }
+
+        status_diff = RunFieldDiffV1(
+            left=left_run.status,
+            right=right_run.status,
+            severity=_diff_severity(left_run.status, right_run.status),
+        )
+        source_url_diff = RunFieldDiffV1(
+            left=left_run.source_url,
+            right=right_run.source_url,
+            severity=_diff_severity(left_run.source_url, right_run.source_url),
+        )
+        agent_version_diff = RunFieldDiffV1(
+            left=left_run.agent_version,
+            right=right_run.agent_version,
+            severity=_diff_severity(left_run.agent_version, right_run.agent_version),
+        )
+
+        notes = ["timeline built from run_events only"]
+
+        return CompareRunDiffResponseV1(
+            left_run_id=str(left_run.id),
+            right_run_id=str(right_run.id),
+            left_created_at=left_run.created_at,
+            right_created_at=right_run.created_at,
+            status_diff=status_diff,
+            source_url_diff=source_url_diff,
+            agent_version_diff=agent_version_diff,
+            phase_counts=phase_counts,
+            error_top=error_top,
+            timeline=timeline,
+            refs=refs,
+            notes=notes,
+        )
     finally:
         session.close()
 

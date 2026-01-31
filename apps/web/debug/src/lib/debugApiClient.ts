@@ -61,3 +61,10 @@ export async function getCompareRunSummary(runId: string) {
 export async function getCompareRunFull(runId: string) {
   return debugGet(`/v1/debug/compare-runs/${runId}`);
 }
+
+export async function diffCompareRuns(leftRunId: string, rightRunId: string) {
+  const params = new URLSearchParams();
+  params.set("left_run_id", leftRunId);
+  params.set("right_run_id", rightRunId);
+  return debugGet(`/v1/debug/compare-runs:diff?${params.toString()}`);
+}

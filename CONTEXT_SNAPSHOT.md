@@ -110,6 +110,7 @@ Verrous techniques en place:
 - GET /v1/debug/compare-runs/{run_id}
 - GET /v1/debug/compare-runs
 - GET /v1/debug/compare-runs/{run_id}:summary
+- GET /v1/debug/compare-runs:diff
 - GET /v1/debug/llm-runs/{id}
 - GET /v1/debug/tool-runs/{id}
 - GET /v1/debug/snapshots/{id}
@@ -199,8 +200,8 @@ Flux reel declenche par `POST /v1/discovery/compare`.
 
 ## Webapp Debug (as-is)
 - emplacement: apps/web/debug (Vite + React + Tailwind)
-- pages: Run Explorer (listing + pagination + detail condense), autres sections en placeholders de navigation
-- limitations: JSON complet charge a la demande uniquement (bouton), pas de diff (PR18)
+- pages: Run Explorer (listing + pagination + detail condense + mode diff), autres sections en placeholders de navigation
+- limitations: JSON complet charge a la demande uniquement (bouton ou foldable JSON brut)
 - primitives UI: FoldableJson, ErrorBanner (visible sans scroll), CopyForChatgptButton (resume texte sans JSON brut)
 - auth debug: ajoute `X-Debug-Token` sur toutes les requetes debug via VITE_DEBUG_API_TOKEN
 
@@ -242,6 +243,7 @@ As-is uniquement : aucune entree "a venir".
 - PR15: debug access guard (deny-by-default + token header) OK
 - PR16: webapp debug (squelette Run Explorer + primitives UI + token header) OK
 - PR17: debug run listing + summary endpoint + Run Explorer pagination/summary OK
+- PR18: debug run diff endpoint + Run Explorer diff UI OK
 
 ## Decisions & Rationale (datees)
 - 2026-01-29: Choix PostgreSQL + Alembic (source unique de verite) avec drift guard bloquant par defaut.
@@ -277,5 +279,6 @@ As-is uniquement : aucune entree "a venir".
 - 2026-01-30: Webapp Debug (apps/web/debug) ajoute Run Explorer MVP + primitives UI (JSON foldable, bandeau erreurs, copie resume ChatGPT) avec token `X-Debug-Token` via VITE_DEBUG_API_TOKEN.
 - 2026-01-30: Debug Run Explorer expose un listing pagine + endpoint `:summary` pour eviter de charger les JSON complets par defaut.
 - 2026-01-30: Listing debug calcule phase_counts/error_top via agregation des run_events (lecture uniquement, sans charger les JSON lourds).
+- 2026-01-30: Diff debug condense base sur run_events + refs ids-only (pas de JSON lourds) pour comparaison rapide.
 - 2026-01-29: `strategy.md` est réservé à ChatGPT (mise à jour uniquement sur demande explicite de l’utilisateur).
 - 2026-01-29: Les stratégies spécifiques par module, si nécessaires, doivent être dérivées de `strategy.md` sans créer de dépendance inverse ni contredire la gouvernance documentaire (statut et périmètre explicités).

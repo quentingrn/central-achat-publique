@@ -1,3 +1,12 @@
+from modules.discovery_compare.adapters.schemas.debug_run_diff_v1 import (
+    CompareRunDiffResponseV1,
+    DiffSeverityV1,
+    RunCountsDiffV1,
+    RunErrorTopDiffV1,
+    RunFieldDiffV1,
+    RunPhaseDiffItemV1,
+    RunRefSetDiffV1,
+)
 from modules.discovery_compare.adapters.schemas.debug_run_v1 import (
     CompareRunListItemV1,
     CompareRunListResponseV1,
@@ -36,4 +45,11 @@ __all__ = [
     "RunTimelineItemV1",
     "RunRefsV1",
     "CompareRunSummaryResponseV1",
+    "DiffSeverityV1",
+    "RunRefSetDiffV1",
+    "RunPhaseDiffItemV1",
+    "RunCountsDiffV1",
+    "RunErrorTopDiffV1",
+    "RunFieldDiffV1",
+    "CompareRunDiffResponseV1",
 ]
