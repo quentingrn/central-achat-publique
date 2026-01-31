@@ -38,3 +38,26 @@ export async function debugGet<T>(path: string): Promise<T> {
   }
   return response.json() as Promise<T>;
 }
+
+export type CompareRunListResponse = {
+  items: unknown[];
+  next_cursor: string | null;
+};
+
+export async function listCompareRuns(limit = 25, cursor?: string | null) {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (cursor) {
+    params.set("cursor", cursor);
+  }
+  const path = `/v1/debug/compare-runs?${params.toString()}`;
+  return debugGet<CompareRunListResponse>(path);
+}
+
+export async function getCompareRunSummary(runId: string) {
+  return debugGet(`/v1/debug/compare-runs/${runId}:summary`);
+}
+
+export async function getCompareRunFull(runId: string) {
+  return debugGet(`/v1/debug/compare-runs/${runId}`);
+}
