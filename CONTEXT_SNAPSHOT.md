@@ -195,12 +195,20 @@ Flux reel declenche par `POST /v1/discovery/compare`.
   - statut: placeholder
   - notes: aucun code execute, aucun acces DB.
 
+## Webapp Debug (as-is)
+- emplacement: apps/web/debug (Vite + React + Tailwind)
+- pages: Run Explorer (MVP), autres sections en placeholders de navigation
+- limitations: aucun endpoint de listing runs as-is; fallback par saisie manuelle de run_id
+- primitives UI: FoldableJson, ErrorBanner (visible sans scroll), CopyForChatgptButton (resume texte sans JSON brut)
+- auth debug: ajoute `X-Debug-Token` sur toutes les requetes debug via VITE_DEBUG_API_TOKEN
+
 ## Commandes utiles (start/test/format/db_reset/db_migrate)
 - Start: ./scripts/start.sh (POSTGRES_PORT et API_PORT configurables)
 - Test: ./scripts/test.sh
 - Format: ./scripts/format.sh
 - DB migrate: ./scripts/db_migrate.sh
 - DB reset: ./scripts/db_reset.sh
+- Web debug: cd apps/web/debug && npm install && npm run dev
 - Prerequis venv: python3 -m venv .venv (scripts utilisent exclusivement .venv/bin/*, PYTHONNOUSERSITE=1)
 - Deps test: ./.venv/bin/pip install -e ".[test]"
 - test.sh auto-installe ".[test]" si deps manquantes (venv neuf)
@@ -210,6 +218,7 @@ Flux reel declenche par `POST /v1/discovery/compare`.
 - Env Snapshots: DISCOVERY_COMPARE_SNAPSHOT_PROVIDER, DISCOVERY_COMPARE_SNAPSHOT_REQUIRE, PLAYWRIGHT_MCP_MODE, PLAYWRIGHT_MCP_COMMAND, PLAYWRIGHT_MCP_ARGS, PLAYWRIGHT_MCP_CWD, PLAYWRIGHT_MCP_URL, PLAYWRIGHT_MCP_TIMEOUT_SECONDS, PLAYWRIGHT_MCP_INSTALL, DISCOVERY_COMPARE_SNAPSHOT_SCREENSHOT_ENABLED, DISCOVERY_COMPARE_SNAPSHOT_MAX_BYTES, DISCOVERY_COMPARE_SNAPSHOT_USER_AGENT, DISCOVERY_COMPARE_SNAPSHOT_PROOF_MODE, BROWSERBASE_API_KEY, BROWSERBASE_TIMEOUT_SECONDS, BROWSERBASE_PROJECT_ID
 - Env Exa MCP: DISCOVERY_COMPARE_PRODUCT_CANDIDATE_PROVIDER, EXA_API_KEY, EXA_MCP_URL, EXA_MCP_TIMEOUT_SECONDS, EXA_MCP_LIMIT
 - Env Debug API: DEBUG_API_ENABLED, DEBUG_API_TOKEN
+- Env Debug Webapp: VITE_DEBUG_API_BASE_URL, VITE_DEBUG_API_TOKEN
 
 ## Etat des PRs (checklist)
 As-is uniquement : aucune entree "a venir".
@@ -229,6 +238,7 @@ As-is uniquement : aucune entree "a venir".
 - PR13: discovery_compare integre sur snapshot.capture_page (callsites remplaces, sans changement API) OK
 - PR14: snapshot append-only (url non unique) + preuve brute opt-in + idempotence intra-run OK
 - PR15: debug access guard (deny-by-default + token header) OK
+- PR16: webapp debug (squelette Run Explorer + primitives UI + token header) OK
 
 ## Decisions & Rationale (datees)
 - 2026-01-29: Choix PostgreSQL + Alembic (source unique de verite) avec drift guard bloquant par defaut.
@@ -261,5 +271,6 @@ As-is uniquement : aucune entree "a venir".
 - 2026-01-30: Support .env.local (dev only) avec priorite explicite sur .env; .env.local ignore par git et tests unitaires couvrent presence/absence et priorite.
 - 2026-01-30: Suppression de la contrainte unique sur page_snapshots.url ; idempotence uniquement intra-run (run_id+url).
 - 2026-01-30: Debug API deny-by-default (404) + token `X-Debug-Token` requis si DEBUG_API_ENABLED=1 (403 sinon).
+- 2026-01-30: Webapp Debug (apps/web/debug) ajoute Run Explorer MVP + primitives UI (JSON foldable, bandeau erreurs, copie resume ChatGPT) avec token `X-Debug-Token` via VITE_DEBUG_API_TOKEN.
 - 2026-01-29: `strategy.md` est réservé à ChatGPT (mise à jour uniquement sur demande explicite de l’utilisateur).
 - 2026-01-29: Les stratégies spécifiques par module, si nécessaires, doivent être dérivées de `strategy.md` sans créer de dépendance inverse ni contredire la gouvernance documentaire (statut et périmètre explicités).
