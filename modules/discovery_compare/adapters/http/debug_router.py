@@ -213,17 +213,6 @@ def _serialize_llm_run(llm_run: LlmRun) -> dict:
     }
 
 
-def _serialize_snapshot(snapshot: PageSnapshot) -> dict:
-    return {
-        "id": str(snapshot.id),
-        "product_id": str(snapshot.product_id),
-        "url": snapshot.url,
-        "extracted_json": snapshot.extracted_json,
-        "created_at": snapshot.created_at.isoformat(),
-        "updated_at": snapshot.updated_at.isoformat(),
-    }
-
-
 @router.get("/compare-runs", response_model=CompareRunListResponseV1)
 def list_compare_runs(
     limit: int = Query(default=25, ge=1, le=100),
@@ -520,18 +509,6 @@ def get_tool_run(run_id: str) -> dict:
         if tool_run is None:
             raise HTTPException(status_code=404, detail="tool run not found")
         return _serialize_tool_run(tool_run)
-    finally:
-        session.close()
-
-
-@router.get("/snapshots/{snapshot_id}")
-def get_snapshot(snapshot_id: str) -> dict:
-    session = get_session()
-    try:
-        snapshot = session.get(PageSnapshot, snapshot_id)
-        if snapshot is None:
-            raise HTTPException(status_code=404, detail="snapshot not found")
-        return _serialize_snapshot(snapshot)
     finally:
         session.close()
 

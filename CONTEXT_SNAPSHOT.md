@@ -114,6 +114,8 @@ Verrous techniques en place:
 - GET /v1/debug/llm-runs/{id}
 - GET /v1/debug/tool-runs/{id}
 - GET /v1/debug/snapshots/{id}
+- GET /v1/debug/snapshots:by-url
+- POST /v1/debug/snapshots:capture
 - GET /v1/debug/prompts/{id}
 
 ## Functional flow (as-is)
@@ -200,7 +202,7 @@ Flux reel declenche par `POST /v1/discovery/compare`.
 
 ## Webapp Debug (as-is)
 - emplacement: apps/web/debug (Vite + React + Tailwind)
-- pages: Run Explorer (listing + pagination + detail condense + mode diff), autres sections en placeholders de navigation
+- pages: Run Explorer (listing + pagination + detail condense + mode diff), Snapshot Inspector (capture URL + lookup snapshot_id/URL), autres sections en placeholders de navigation
 - limitations: JSON complet charge a la demande uniquement (bouton ou foldable JSON brut)
 - primitives UI: FoldableJson, ErrorBanner (visible sans scroll), CopyForChatgptButton (resume texte sans JSON brut)
 - auth debug: ajoute `X-Debug-Token` sur toutes les requetes debug via VITE_DEBUG_API_TOKEN
@@ -244,6 +246,7 @@ As-is uniquement : aucune entree "a venir".
 - PR16: webapp debug (squelette Run Explorer + primitives UI + token header) OK
 - PR17: debug run listing + summary endpoint + Run Explorer pagination/summary OK
 - PR18: debug run diff endpoint + Run Explorer diff UI OK
+- PR19: snapshot inspector endpoints + webapp snapshot inspector OK
 
 ## Decisions & Rationale (datees)
 - 2026-01-29: Choix PostgreSQL + Alembic (source unique de verite) avec drift guard bloquant par defaut.
@@ -280,5 +283,6 @@ As-is uniquement : aucune entree "a venir".
 - 2026-01-30: Debug Run Explorer expose un listing pagine + endpoint `:summary` pour eviter de charger les JSON complets par defaut.
 - 2026-01-30: Listing debug calcule phase_counts/error_top via agregation des run_events (lecture uniquement, sans charger les JSON lourds).
 - 2026-01-30: Diff debug condense base sur run_events + refs ids-only (pas de JSON lourds) pour comparaison rapide.
+- 2026-01-31: Debug snapshot ajoute capture/lookup sans resolution de content_ref (lecture Postgres uniquement) ; tests utilisent provider stub pour rester sans reseau.
 - 2026-01-29: `strategy.md` est réservé à ChatGPT (mise à jour uniquement sur demande explicite de l’utilisateur).
 - 2026-01-29: Les stratégies spécifiques par module, si nécessaires, doivent être dérivées de `strategy.md` sans créer de dépendance inverse ni contredire la gouvernance documentaire (statut et périmètre explicités).

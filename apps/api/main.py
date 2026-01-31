@@ -12,6 +12,7 @@ from apps.api.middleware.request_logging import RequestLoggingMiddleware
 from apps.api.middleware.trace_id import TraceIdMiddleware
 from modules.discovery_compare.adapters.http.debug_router import router as debug_router
 from modules.discovery_compare.adapters.http.router import router as discovery_router
+from modules.snapshot.adapters.http.debug_router import router as snapshot_debug_router
 from shared.db.settings import get_db_settings
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
@@ -58,3 +59,4 @@ def health() -> dict:
 
 app.include_router(discovery_router)
 app.include_router(debug_router)
+app.include_router(snapshot_debug_router)

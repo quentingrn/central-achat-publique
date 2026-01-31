@@ -95,6 +95,23 @@ export type DebugDiffSummary = {
   refs: DiffRefs;
 };
 
+export type DebugSnapshotSummary = {
+  snapshotId: string;
+  url: string;
+  finalUrl?: string | null;
+  provider: string;
+  status?: string | null;
+  httpStatus?: number | null;
+  capturedAt?: string | null;
+  extractionMethod?: string | null;
+  extractionStatus?: string | null;
+  rulesVersion?: string | null;
+  digestHash?: string | null;
+  missingCritical?: string[];
+  errors?: Record<string, unknown>[];
+  notes?: string[];
+};
+
 export function buildChatGptSummary(summary: DebugSummary): string {
   const lines: string[] = [];
   lines.push("Debug summary (condensed)");
@@ -197,5 +214,56 @@ export function buildChatGptDiffSummary(diff: DebugDiffSummary): string {
   lines.push(
     `refs: snapshots +${diff.refs.snapshots.added_ids.length}/-${diff.refs.snapshots.removed_ids.length} common=${diff.refs.snapshots.common_count}, tool_runs +${diff.refs.tool_runs.added_ids.length}/-${diff.refs.tool_runs.removed_ids.length} common=${diff.refs.tool_runs.common_count}, llm_runs +${diff.refs.llm_runs.added_ids.length}/-${diff.refs.llm_runs.removed_ids.length} common=${diff.refs.llm_runs.common_count}, prompts +${diff.refs.prompts.added_ids.length}/-${diff.refs.prompts.removed_ids.length} common=${diff.refs.prompts.common_count}`
   );
+  return lines.join("\n");
+}
+
+export function buildChatGptSnapshotSummary(summary: DebugSnapshotSummary): string {
+  const lines: string[] = [];
+  lines.push("Snapshot summary (condensed)");
+  lines.push(`snapshot_id: ${summary.snapshotId}`);
+  lines.push(`url: ${summary.url}`);
+  if (summary.finalUrl) {
+    lines.push(`final_url: ${summary.finalUrl}`);
+  }
+  lines.push(`provider: ${summary.provider}`);
+  if (summary.status) {
+    lines.push(`status: ${summary.status}`);
+  }
+  if (summary.httpStatus !== undefined && summary.httpStatus !== null) {
+    lines.push(`http_status: ${summary.httpStatus}`);
+  }
+  if (summary.capturedAt) {
+    lines.push(`captured_at: ${summary.capturedAt}`);
+  }
+  if (summary.extractionMethod) {
+    lines.push(`extraction_method: ${summary.extractionMethod}`);
+  }
+  if (summary.extractionStatus) {
+    lines.push(`extraction_status: ${summary.extractionStatus}`);
+  }
+  if (summary.rulesVersion) {
+    lines.push(`rules_version: ${summary.rulesVersion}`);
+  }
+  if (summary.digestHash) {
+    lines.push(`digest_hash: ${summary.digestHash}`);
+  }
+  if (summary.missingCritical && summary.missingCritical.length) {
+    lines.push(`missing_critical: ${summary.missingCritical.join(", ")}`);
+  }
+  if (summary.errors && summary.errors.length) {
+    lines.push("errors:");
+    summary.errors.slice(0, 6).forEach((error) => {
+      const code = typeof error["code"] === "string" ? error["code"] : "error";
+      const message = typeof error["message"] === "string" ? error["message"] : "";
+      lines.push(`- ${code}${message ? `: ${message}` : ""}`);
+    });
+    if (summary.errors.length > 6) {
+      lines.push(`- ... (${summary.errors.length - 6} more)`);
+    }
+  }
+  if (summary.notes && summary.notes.length) {
+    lines.push("notes:");
+    summary.notes.forEach((note) => lines.push(`- ${note}`));
+  }
   return lines.join("\n");
 }
