@@ -1,3 +1,8 @@
+from modules.discovery_compare.adapters.schemas.debug_exa_recall_v1 import (
+    ExaRecallRequestV1,
+    ExaRecallResponseV1,
+    ExaResultItemV1,
+)
 from modules.discovery_compare.adapters.schemas.debug_run_diff_v1 import (
     CompareRunDiffResponseV1,
     DiffSeverityV1,
@@ -52,4 +57,7 @@ __all__ = [
     "RunErrorTopDiffV1",
     "RunFieldDiffV1",
     "CompareRunDiffResponseV1",
+    "ExaRecallRequestV1",
+    "ExaResultItemV1",
+    "ExaRecallResponseV1",
 ]

@@ -112,6 +112,25 @@ export type DebugSnapshotSummary = {
   notes?: string[];
 };
 
+export type DebugRecallSummary = {
+  query: string;
+  numResults: number;
+  includeDomains?: string[];
+  excludeDomains?: string[];
+  language?: string | null;
+  country?: string | null;
+  useAutoprompt?: boolean | null;
+  tookMs?: number | null;
+  items: {
+    title?: string | null;
+    url: string;
+    domain?: string | null;
+    score?: number | null;
+  }[];
+  metrics?: Record<string, unknown>;
+  errors?: Record<string, unknown>[];
+};
+
 export function buildChatGptSummary(summary: DebugSummary): string {
   const lines: string[] = [];
   lines.push("Debug summary (condensed)");
@@ -264,6 +283,62 @@ export function buildChatGptSnapshotSummary(summary: DebugSnapshotSummary): stri
   if (summary.notes && summary.notes.length) {
     lines.push("notes:");
     summary.notes.forEach((note) => lines.push(`- ${note}`));
+  }
+  return lines.join("\n");
+}
+
+export function buildChatGptRecallSummary(summary: DebugRecallSummary): string {
+  const lines: string[] = [];
+  lines.push("Exa recall summary (condensed)");
+  lines.push(`query: ${summary.query}`);
+  lines.push(`num_results: ${summary.numResults}`);
+  if (summary.includeDomains && summary.includeDomains.length) {
+    lines.push(`include_domains: ${summary.includeDomains.join(", ")}`);
+  }
+  if (summary.excludeDomains && summary.excludeDomains.length) {
+    lines.push(`exclude_domains: ${summary.excludeDomains.join(", ")}`);
+  }
+  if (summary.language) {
+    lines.push(`language: ${summary.language}`);
+  }
+  if (summary.country) {
+    lines.push(`country: ${summary.country}`);
+  }
+  if (summary.useAutoprompt !== undefined && summary.useAutoprompt !== null) {
+    lines.push(`use_autoprompt: ${summary.useAutoprompt}`);
+  }
+  if (summary.tookMs !== undefined && summary.tookMs !== null) {
+    lines.push(`took_ms: ${summary.tookMs}`);
+  }
+  if (summary.metrics) {
+    const uniqueDomains = summary.metrics["unique_domains_count"];
+    const topDomains = summary.metrics["top_domains"];
+    if (typeof uniqueDomains === "number") {
+      lines.push(`unique_domains_count: ${uniqueDomains}`);
+    }
+    if (Array.isArray(topDomains)) {
+      const condensed = topDomains
+        .slice(0, 5)
+        .map((item) => `${item.domain ?? "unknown"}:${item.count ?? 0}`)
+        .join(", ");
+      lines.push(`top_domains: ${condensed}`);
+    }
+  }
+  const preview = summary.items.slice(0, 3);
+  if (preview.length) {
+    lines.push("top_results:");
+    preview.forEach((item) => {
+      const score =
+        typeof item.score === "number" ? ` (${item.score.toFixed(3)})` : "";
+      lines.push(`- ${item.domain ?? "unknown"}: ${item.title ?? item.url}${score}`);
+    });
+  }
+  if (summary.errors && summary.errors.length) {
+    lines.push("errors:");
+    summary.errors.slice(0, 5).forEach((error) => {
+      const message = typeof error["message"] === "string" ? error["message"] : "error";
+      lines.push(`- ${message}`);
+    });
   }
   return lines.join("\n");
 }

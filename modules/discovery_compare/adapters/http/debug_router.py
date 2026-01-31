@@ -1,10 +1,17 @@
+import time
 import uuid
 from datetime import datetime
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, tuple_
 
 from apps.api.guards import require_debug_access
+from modules.discovery_compare.adapters.schemas.debug_exa_recall_v1 import (
+    ExaRecallRequestV1,
+    ExaRecallResponseV1,
+    ExaResultItemV1,
+)
 from modules.discovery_compare.adapters.schemas.debug_run_diff_v1 import (
     CompareRunDiffResponseV1,
     DiffSeverityV1,
@@ -24,6 +31,11 @@ from modules.discovery_compare.adapters.schemas.debug_run_v1 import (
     RunTimelineItemV1,
 )
 from modules.discovery_compare.adapters.schemas.v1 import PhaseNameV1
+from modules.discovery_compare.application.settings import get_discovery_compare_settings
+from modules.discovery_compare.infrastructure.mcp_clients.exa import (
+    ExaMcpError,
+    HttpExaMcpClient,
+)
 from modules.discovery_compare.infrastructure.persistence.models import (
     CompareRun,
     LlmRun,
@@ -124,6 +136,93 @@ def _build_ref_diff(left_ids: list[uuid.UUID], right_ids: list[uuid.UUID]) -> Ru
         removed_ids=removed,
         common_count=common_count,
     )
+
+
+def _parse_exa_datetime(value: object | None) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = value.replace("Z", "+00:00") if value.endswith("Z") else value
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def _normalize_exa_domain(url: str, domain: str | None) -> str | None:
+    if domain:
+        return domain.strip().lower()
+    parsed = urlparse(url)
+    if parsed.netloc:
+        return parsed.netloc.lower()
+    return None
+
+
+def _normalize_exa_items(results: list[dict]) -> list[ExaResultItemV1]:
+    items: list[ExaResultItemV1] = []
+    for item in results:
+        url = item.get("url") or item.get("link")
+        if not isinstance(url, str) or not url.strip():
+            continue
+        domain = _normalize_exa_domain(url, item.get("domain"))
+        items.append(
+            ExaResultItemV1(
+                rank=len(items) + 1,
+                title=item.get("title"),
+                url=url,
+                domain=domain,
+                score=item.get("score"),
+                snippet=item.get("snippet") or item.get("summary"),
+                published_at=_parse_exa_datetime(
+                    item.get("published_at") or item.get("publishedAt")
+                ),
+            )
+        )
+    return items
+
+
+def _build_exa_metrics(items: list[ExaResultItemV1]) -> dict:
+    domains: list[str] = [item.domain for item in items if item.domain]
+    domain_counts: dict[str, int] = {}
+    for domain in domains:
+        domain_counts[domain] = domain_counts.get(domain, 0) + 1
+    top_domains = [
+        {"domain": domain, "count": count}
+        for domain, count in sorted(domain_counts.items(), key=lambda pair: (-pair[1], pair[0]))
+    ]
+    urls = [item.url for item in items]
+    has_duplicate_urls = len(urls) != len(set(urls))
+    return {
+        "unique_domains_count": len(domain_counts),
+        "top_domains": top_domains,
+        "has_duplicate_urls": has_duplicate_urls,
+    }
+
+
+def _stub_exa_results(limit: int) -> list[dict]:
+    base = [
+        {
+            "title": "Example A",
+            "url": "https://example.com/item-a",
+            "domain": "example.com",
+            "score": 0.92,
+            "snippet": "Example A snippet",
+        },
+        {
+            "title": "Example B",
+            "url": "https://example.org/item-b",
+            "domain": "example.org",
+            "score": 0.81,
+            "snippet": "Example B snippet",
+        },
+        {
+            "title": "Example A duplicate",
+            "url": "https://example.com/item-a",
+            "domain": "example.com",
+            "score": 0.78,
+            "snippet": "Duplicate URL",
+        },
+    ]
+    return base[: max(1, min(limit, len(base)))]
 
 
 def _duration_ms(run: CompareRun) -> int | None:
@@ -469,6 +568,53 @@ def diff_compare_runs(
         )
     finally:
         session.close()
+
+
+@router.post("/recall/exa", response_model=ExaRecallResponseV1)
+def debug_exa_recall(payload: ExaRecallRequestV1) -> ExaRecallResponseV1:
+    settings = get_discovery_compare_settings()
+    start = time.perf_counter()
+    errors: list[dict] = []
+    raw: dict | None = None
+    items: list[ExaResultItemV1] = []
+
+    request_payload = payload.model_dump(exclude_none=True)
+    limit = request_payload.pop("num_results", payload.num_results)
+    request_payload["limit"] = limit
+    request_payload["timeout_seconds"] = settings.exa_mcp_timeout_seconds
+
+    if settings.exa_mcp_url == "stub":
+        raw = {"results": _stub_exa_results(limit)}
+    elif not settings.exa_mcp_url:
+        errors.append({"kind": "config", "message": "EXA_MCP_URL not configured", "status": 500})
+    else:
+        client = HttpExaMcpClient(settings.exa_mcp_url, api_key=settings.exa_api_key)
+        try:
+            raw = client.search_raw(
+                request_payload,
+                timeout_seconds=settings.exa_mcp_timeout_seconds,
+            )
+        except ExaMcpError as exc:
+            errors.append({"kind": "provider", "message": str(exc)})
+        except Exception as exc:  # pragma: no cover - defensive
+            errors.append({"kind": "provider", "message": str(exc)})
+
+    if raw:
+        results = raw.get("results") or raw.get("items") or []
+        if isinstance(results, list):
+            items = _normalize_exa_items(results)
+
+    metrics = _build_exa_metrics(items)
+    took_ms = int((time.perf_counter() - start) * 1000)
+    return ExaRecallResponseV1(
+        request=payload,
+        provider="exa",
+        took_ms=took_ms,
+        items=items,
+        raw=raw,
+        errors=errors,
+        metrics=metrics,
+    )
 
 
 @router.get("/compare-runs/{run_id}")

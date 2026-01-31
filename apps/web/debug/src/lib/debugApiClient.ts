@@ -114,3 +114,40 @@ export async function captureSnapshot(payload: SnapshotCaptureRequest) {
   }
   return response.json();
 }
+
+export type ExaRecallRequest = {
+  query: string;
+  num_results?: number;
+  include_domains?: string[] | null;
+  exclude_domains?: string[] | null;
+  language?: string | null;
+  country?: string | null;
+  use_autoprompt?: boolean | null;
+};
+
+export async function recallExa(payload: ExaRecallRequest) {
+  const response = await fetch(buildUrl("/v1/debug/recall/exa"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Debug-Token": token,
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = await response.text();
+    }
+    const error: ApiError = {
+      kind: "api",
+      status: response.status,
+      message: response.statusText || "API error",
+      body,
+    };
+    throw error;
+  }
+  return response.json();
+}

@@ -11,10 +11,20 @@ import {
   getSnapshot,
   listCompareRuns,
   listSnapshotsByUrl,
+  recallExa,
 } from "./lib/debugApiClient";
 import { normalizeError } from "./lib/normalizeError";
-import { buildChatGptDiffSummary, buildChatGptSnapshotSummary } from "./lib/summary";
-import type { DebugDiffSummary, DebugSnapshotSummary, DebugSummary } from "./lib/summary";
+import {
+  buildChatGptDiffSummary,
+  buildChatGptRecallSummary,
+  buildChatGptSnapshotSummary,
+} from "./lib/summary";
+import type {
+  DebugDiffSummary,
+  DebugRecallSummary,
+  DebugSnapshotSummary,
+  DebugSummary,
+} from "./lib/summary";
 
 const NAV_ITEMS = [
   "Run Explorer",
@@ -169,6 +179,83 @@ type SnapshotCaptureResponse = {
   summary: SnapshotGetResponse;
 };
 
+type ExaRecallRequest = {
+  query: string;
+  num_results: number;
+  include_domains?: string[] | null;
+  exclude_domains?: string[] | null;
+  language?: string | null;
+  country?: string | null;
+  use_autoprompt?: boolean | null;
+};
+
+type ExaResultItem = {
+  rank: number;
+  title?: string | null;
+  url: string;
+  domain?: string | null;
+  score?: number | null;
+  snippet?: string | null;
+  published_at?: string | null;
+};
+
+type ExaRecallResponse = {
+  request: ExaRecallRequest;
+  provider: string;
+  took_ms?: number | null;
+  items: ExaResultItem[];
+  raw?: Record<string, unknown> | null;
+  errors: Record<string, unknown>[];
+  metrics: Record<string, unknown>;
+};
+
+const buildRecallStorageKey = (request: ExaRecallRequest) => {
+  const normalized = {
+    query: request.query,
+    num_results: request.num_results,
+    include_domains: request.include_domains ?? [],
+    exclude_domains: request.exclude_domains ?? [],
+    language: request.language ?? null,
+    country: request.country ?? null,
+    use_autoprompt: request.use_autoprompt ?? null,
+  };
+  const payload = JSON.stringify(normalized);
+  try {
+    return `recall:${btoa(unescape(encodeURIComponent(payload)))}`;
+  } catch {
+    return `recall:${payload}`;
+  }
+};
+
+const loadRecallAnnotations = (key: string) => {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      return parsed as Record<string, { label: string; reason: string }>;
+    }
+  } catch {
+    return {};
+  }
+  return {};
+};
+
+const saveRecallAnnotations = (
+  key: string,
+  value: Record<string, { label: string; reason: string }>
+) => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(key, JSON.stringify(value));
+};
+
 export default function App() {
   const [activeTab, setActiveTab] = useState(NAV_ITEMS[0]);
   const [runs, setRuns] = useState<CompareRunListItem[]>([]);
@@ -189,6 +276,18 @@ export default function App() {
   const [captureProofMode, setCaptureProofMode] = useState("none");
   const [captureScreenshot, setCaptureScreenshot] = useState(false);
   const [captureMaxBytes, setCaptureMaxBytes] = useState("");
+  const [recallQuery, setRecallQuery] = useState("");
+  const [recallNumResults, setRecallNumResults] = useState(10);
+  const [recallIncludeDomains, setRecallIncludeDomains] = useState("");
+  const [recallExcludeDomains, setRecallExcludeDomains] = useState("");
+  const [recallLanguage, setRecallLanguage] = useState("");
+  const [recallCountry, setRecallCountry] = useState("");
+  const [recallAutoprompt, setRecallAutoprompt] = useState(false);
+  const [recallResponse, setRecallResponse] = useState<ExaRecallResponse | null>(null);
+  const [recallAnnotations, setRecallAnnotations] = useState<
+    Record<string, { label: string; reason: string }>
+  >({});
+  const [recallExport, setRecallExport] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<ReturnType<typeof normalizeError>[]>([]);
 
@@ -242,6 +341,61 @@ export default function App() {
       errors: item.errors,
     } as DebugSnapshotSummary);
   }, [snapshotDetail, snapshotCapture]);
+
+  const recallSummaryText = useMemo(() => {
+    if (!recallResponse) {
+      return null;
+    }
+    return buildChatGptRecallSummary({
+      query: recallResponse.request.query,
+      numResults: recallResponse.request.num_results,
+      includeDomains: recallResponse.request.include_domains ?? undefined,
+      excludeDomains: recallResponse.request.exclude_domains ?? undefined,
+      language: recallResponse.request.language ?? undefined,
+      country: recallResponse.request.country ?? undefined,
+      useAutoprompt: recallResponse.request.use_autoprompt ?? undefined,
+      tookMs: recallResponse.took_ms ?? undefined,
+      items: recallResponse.items.map((item) => ({
+        title: item.title,
+        url: item.url,
+        domain: item.domain,
+        score: item.score,
+      })),
+      metrics: recallResponse.metrics,
+      errors: recallResponse.errors,
+    } as DebugRecallSummary);
+  }, [recallResponse]);
+
+  const recallDuplicateUrls = useMemo(() => {
+    if (!recallResponse) {
+      return new Set<string>();
+    }
+    const counts = new Map<string, number>();
+    recallResponse.items.forEach((item) => {
+      counts.set(item.url, (counts.get(item.url) ?? 0) + 1);
+    });
+    const duplicates = new Set<string>();
+    counts.forEach((count, url) => {
+      if (count > 1) {
+        duplicates.add(url);
+      }
+    });
+    return duplicates;
+  }, [recallResponse]);
+
+  const recallTopDomains = useMemo(() => {
+    if (!recallResponse) {
+      return [] as { domain: string; count: number }[];
+    }
+    const topDomains = recallResponse.metrics?.["top_domains"];
+    if (Array.isArray(topDomains)) {
+      return topDomains.map((item) => ({
+        domain: String(item.domain ?? "unknown"),
+        count: Number(item.count ?? 0),
+      }));
+    }
+    return [];
+  }, [recallResponse]);
 
   const fetchRuns = async (cursor?: string | null) => {
     setLoading(true);
@@ -385,6 +539,78 @@ export default function App() {
     }
   };
 
+  const parseDomainList = (value: string) =>
+    value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+  const runExaRecall = async () => {
+    if (!recallQuery.trim()) {
+      setErrors([normalizeError(new Error("Provide a query for recall."))]);
+      return;
+    }
+    setLoading(true);
+    setErrors([]);
+    try {
+      const includeDomains = parseDomainList(recallIncludeDomains);
+      const excludeDomains = parseDomainList(recallExcludeDomains);
+      const payload = {
+        query: recallQuery.trim(),
+        num_results: Math.min(20, Math.max(1, recallNumResults)),
+        include_domains: includeDomains.length ? includeDomains : null,
+        exclude_domains: excludeDomains.length ? excludeDomains : null,
+        language: recallLanguage.trim() || null,
+        country: recallCountry.trim() || null,
+        use_autoprompt: recallAutoprompt ? true : null,
+      };
+      const data = await recallExa(payload);
+      setRecallResponse(data as ExaRecallResponse);
+      setRecallExport(null);
+    } catch (error) {
+      setErrors([normalizeError(error)]);
+      setRecallResponse(null);
+      setRecallExport(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateRecallAnnotation = (url: string, label: string) => {
+    if (!recallStorageKey) {
+      return;
+    }
+    const updated = {
+      ...recallAnnotations,
+      [url]: { label, reason: recallAnnotations[url]?.reason ?? "" },
+    };
+    setRecallAnnotations(updated);
+    saveRecallAnnotations(recallStorageKey, updated);
+  };
+
+  const updateRecallReason = (url: string, reason: string) => {
+    if (!recallStorageKey) {
+      return;
+    }
+    const updated = {
+      ...recallAnnotations,
+      [url]: { label: recallAnnotations[url]?.label ?? "neutral", reason },
+    };
+    setRecallAnnotations(updated);
+    saveRecallAnnotations(recallStorageKey, updated);
+  };
+
+  const exportRecallAnnotations = () => {
+    if (!recallResponse || !recallStorageKey) {
+      return;
+    }
+    setRecallExport({
+      key: recallStorageKey,
+      request: recallResponse.request,
+      annotations: recallAnnotations,
+    });
+  };
+
   useEffect(() => {
     void fetchRuns();
   }, []);
@@ -394,6 +620,19 @@ export default function App() {
       void fetchSummary(selectedRunId);
     }
   }, [selectedRunId]);
+
+  const recallStorageKey = useMemo(() => {
+    if (!recallResponse) {
+      return null;
+    }
+    return buildRecallStorageKey(recallResponse.request);
+  }, [recallResponse]);
+
+  useEffect(() => {
+    if (recallStorageKey) {
+      setRecallAnnotations(loadRecallAnnotations(recallStorageKey));
+    }
+  }, [recallStorageKey]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -984,7 +1223,268 @@ export default function App() {
             </section>
           ) : null}
 
-          {activeTab !== "Run Explorer" && activeTab !== "Snapshot Inspector" ? (
+          {activeTab === "Recall Lab (Exa)" ? (
+            <section className="space-y-6">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <div className="text-2xl font-semibold">Recall Lab (Exa)</div>
+                  <div className="text-xs text-slate-400">
+                    Debug recall relevance and diversity. Annotations stored in localStorage only.
+                  </div>
+                </div>
+                <CopyForChatgptButton textOverride={recallSummaryText ?? undefined} />
+              </div>
+
+              <section className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+                <div className="text-sm font-semibold text-slate-200">Recall parameters</div>
+                <div className="mt-3 grid gap-3">
+                  <textarea
+                    value={recallQuery}
+                    onChange={(event) => setRecallQuery(event.target.value)}
+                    placeholder="Query (brand + model + attributes)"
+                    className="min-h-[96px] w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+                  />
+                  <div className="grid gap-3 text-xs text-slate-300 md:grid-cols-3">
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[11px] uppercase text-slate-500">num results</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={recallNumResults}
+                        onChange={(event) => setRecallNumResults(Number(event.target.value))}
+                        className="rounded-md border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[11px] uppercase text-slate-500">include domains</span>
+                      <input
+                        value={recallIncludeDomains}
+                        onChange={(event) => setRecallIncludeDomains(event.target.value)}
+                        placeholder="example.com, example.org"
+                        className="rounded-md border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[11px] uppercase text-slate-500">exclude domains</span>
+                      <input
+                        value={recallExcludeDomains}
+                        onChange={(event) => setRecallExcludeDomains(event.target.value)}
+                        placeholder="ads.example.com"
+                        className="rounded-md border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[11px] uppercase text-slate-500">language</span>
+                      <input
+                        value={recallLanguage}
+                        onChange={(event) => setRecallLanguage(event.target.value)}
+                        placeholder="fr"
+                        className="rounded-md border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[11px] uppercase text-slate-500">country</span>
+                      <input
+                        value={recallCountry}
+                        onChange={(event) => setRecallCountry(event.target.value)}
+                        placeholder="FR"
+                        className="rounded-md border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100"
+                      />
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={recallAutoprompt}
+                        onChange={(event) => setRecallAutoprompt(event.target.checked)}
+                      />
+                      use autoprompt
+                    </label>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      onClick={runExaRecall}
+                      className="rounded-md bg-slate-200 px-3 py-2 text-xs font-semibold text-slate-900"
+                      type="button"
+                      disabled={loading}
+                    >
+                      Lancer recall
+                    </button>
+                    <button
+                      onClick={exportRecallAnnotations}
+                      className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200"
+                      type="button"
+                      disabled={!recallResponse}
+                    >
+                      Export annotations (json)
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              {recallResponse ? (
+                <section className="space-y-4">
+                  {recallResponse.errors.length ? (
+                    <div className="rounded-xl border border-red-900 bg-red-950/40 p-4 text-xs text-red-100">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <div className="text-sm font-semibold text-red-200">Recall errors</div>
+                          <ul className="mt-2 space-y-1">
+                            {recallResponse.errors.map((error, index) => (
+                              <li key={`recall-error-${index}`}>
+                                {typeof error["kind"] === "string"
+                                  ? `[${error["kind"]}] `
+                                  : ""}
+                                {typeof error["message"] === "string"
+                                  ? error["message"]
+                                  : "error"}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                        <button
+                          onClick={() =>
+                            navigator.clipboard.writeText(
+                              JSON.stringify(recallResponse.errors, null, 2)
+                            )
+                          }
+                          className="rounded-md bg-red-200 px-3 py-2 text-xs font-semibold text-red-950"
+                          type="button"
+                        >
+                          📋 Copier erreur brute
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4 text-xs text-slate-300">
+                    <div className="flex flex-wrap gap-4">
+                      <span>provider: {recallResponse.provider}</span>
+                      <span>took_ms: {recallResponse.took_ms ?? "n/a"}</span>
+                      <span>
+                        unique_domains:{" "}
+                        {recallResponse.metrics?.["unique_domains_count"] ?? "n/a"}
+                      </span>
+                      <span>
+                        duplicate_urls:{" "}
+                        {recallResponse.metrics?.["has_duplicate_urls"] ? "yes" : "no"}
+                      </span>
+                    </div>
+                    {recallTopDomains.length ? (
+                      <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-200">
+                        {recallTopDomains.map((item) => (
+                          <span
+                            key={item.domain}
+                            className="rounded-full border border-slate-700 px-2 py-1"
+                          >
+                            {item.domain} ({item.count})
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+                    <div className="text-xs uppercase text-slate-400">Results</div>
+                    <div className="mt-3 space-y-3">
+                      {recallResponse.items.map((item) => {
+                        const annotation = recallAnnotations[item.url] ?? {
+                          label: "neutral",
+                          reason: "",
+                        };
+                        const isDuplicate = recallDuplicateUrls.has(item.url);
+                        return (
+                          <div
+                            key={`${item.rank}-${item.url}`}
+                            className="rounded-md border border-slate-800 bg-slate-950/60 px-3 py-3 text-xs text-slate-300"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="text-slate-100">
+                                #{item.rank} {item.title ?? item.url}
+                              </div>
+                              {isDuplicate ? (
+                                <span className="rounded-full border border-red-800 px-2 py-0.5 text-[10px] text-red-200">
+                                  duplicate
+                                </span>
+                              ) : null}
+                            </div>
+                            <div className="mt-1 text-slate-400">
+                              <a
+                                href={item.url}
+                                className="underline"
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                {item.url}
+                              </a>
+                            </div>
+                            <div className="mt-1 flex flex-wrap gap-3 text-[11px] text-slate-400">
+                              <span>domain: {item.domain ?? "n/a"}</span>
+                              <span>score: {item.score ?? "n/a"}</span>
+                            </div>
+                            {item.snippet ? (
+                              <div className="mt-2 text-xs text-slate-300">
+                                {item.snippet}
+                              </div>
+                            ) : null}
+                            <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-slate-300">
+                              <label className="flex items-center gap-1">
+                                <input
+                                  type="radio"
+                                  name={`annot-${item.rank}`}
+                                  checked={annotation.label === "relevant"}
+                                  onChange={() => updateRecallAnnotation(item.url, "relevant")}
+                                />
+                                pertinent
+                              </label>
+                              <label className="flex items-center gap-1">
+                                <input
+                                  type="radio"
+                                  name={`annot-${item.rank}`}
+                                  checked={annotation.label === "neutral"}
+                                  onChange={() => updateRecallAnnotation(item.url, "neutral")}
+                                />
+                                neutre
+                              </label>
+                              <label className="flex items-center gap-1">
+                                <input
+                                  type="radio"
+                                  name={`annot-${item.rank}`}
+                                  checked={annotation.label === "irrelevant"}
+                                  onChange={() => updateRecallAnnotation(item.url, "irrelevant")}
+                                />
+                                non pertinent
+                              </label>
+                            </div>
+                            <input
+                              value={annotation.reason}
+                              onChange={(event) => updateRecallReason(item.url, event.target.value)}
+                              placeholder="raison courte"
+                              className="mt-2 w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-2 text-xs text-slate-100"
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <FoldableJson title="raw" data={recallResponse.raw} />
+                  <FoldableJson title="errors" data={recallResponse.errors} />
+                  {recallExport ? (
+                    <FoldableJson title="annotations (export)" data={recallExport} />
+                  ) : null}
+                </section>
+              ) : (
+                <section className="rounded-xl border border-dashed border-slate-800 bg-slate-900/20 p-6 text-sm text-slate-400">
+                  No recall data yet. Provide a query and run recall.
+                </section>
+              )}
+            </section>
+          ) : null}
+
+          {activeTab !== "Run Explorer" &&
+          activeTab !== "Snapshot Inspector" &&
+          activeTab !== "Recall Lab (Exa)" ? (
             <section className="rounded-xl border border-dashed border-slate-800 bg-slate-900/20 p-6 text-sm text-slate-400">
               {activeTab} is a placeholder. Use Run Explorer or Snapshot Inspector for now.
             </section>
