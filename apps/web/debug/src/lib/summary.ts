@@ -143,6 +143,14 @@ export type DebugCandidateJudgeSummary = {
   errors?: Record<string, unknown>[];
 };
 
+export type DebugLlmRunsSummary = {
+  runId: string;
+  total: number;
+  withErrors: number;
+  models: string[];
+  topErrors: Array<{ phase?: string | null; message: string }>;
+};
+
 export function buildChatGptSummary(summary: DebugSummary): string {
   const lines: string[] = [];
   lines.push("Debug summary (condensed)");
@@ -396,6 +404,25 @@ export function buildChatGptCandidateJudgeSummary(
     summary.errors.slice(0, 5).forEach((error) => {
       const message = typeof error["message"] === "string" ? error["message"] : "error";
       lines.push(`- ${message}`);
+    });
+  }
+  return lines.join("\n");
+}
+
+export function buildChatGptLlmRunsSummary(summary: DebugLlmRunsSummary): string {
+  const lines: string[] = [];
+  lines.push("LLM runs summary (condensed)");
+  lines.push(`run_id: ${summary.runId}`);
+  lines.push(`total: ${summary.total}`);
+  lines.push(`with_errors: ${summary.withErrors}`);
+  if (summary.models.length) {
+    lines.push(`models: ${summary.models.join(", ")}`);
+  }
+  if (summary.topErrors.length) {
+    lines.push("top_errors:");
+    summary.topErrors.slice(0, 3).forEach((item) => {
+      const phase = item.phase ? `${item.phase}: ` : "";
+      lines.push(`- ${phase}${item.message}`);
     });
   }
   return lines.join("\n");

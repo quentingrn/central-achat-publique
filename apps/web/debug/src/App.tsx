@@ -9,7 +9,9 @@ import {
   getCompareRunFull,
   getCompareRunSummary,
   getSnapshot,
+  getLlmRunDetail,
   judgeCandidates,
+  listLlmRunsByRun,
   listCompareRuns,
   listSnapshotsByUrl,
   recallExa,
@@ -20,10 +22,12 @@ import {
   buildChatGptCandidateJudgeSummary,
   buildChatGptRecallSummary,
   buildChatGptSnapshotSummary,
+  buildChatGptLlmRunsSummary,
 } from "./lib/summary";
 import type {
   DebugDiffSummary,
   DebugCandidateJudgeSummary,
+  DebugLlmRunsSummary,
   DebugRecallSummary,
   DebugSnapshotSummary,
   DebugSummary,
@@ -252,6 +256,53 @@ type CandidateJudgeResponse = {
   raw?: Record<string, unknown> | null;
 };
 
+type LlmRunListItem = {
+  id: string;
+  run_id: string;
+  created_at?: string | null;
+  status?: string | null;
+  model_name?: string | null;
+  prompt_id?: string | null;
+  prompt_hash?: string | null;
+  json_schema_hash?: string | null;
+  phase_name?: string | null;
+  has_validation_errors: boolean;
+  validation_errors_count: number;
+  short_error?: string | null;
+};
+
+type LlmRunListResponse = {
+  run_id: string;
+  items: LlmRunListItem[];
+  counts: Record<string, unknown>;
+};
+
+type LlmRunDetail = {
+  id: string;
+  run_id: string;
+  created_at?: string | null;
+  status?: string | null;
+  model_name?: string | null;
+  model_params?: Record<string, unknown> | null;
+  phase_name?: string | null;
+  prompt: {
+    id?: string | null;
+    name?: string | null;
+    version?: string | null;
+    content_hash?: string | null;
+    content?: string | null;
+  };
+  json_schema: {
+    hash?: string | null;
+    schema?: Record<string, unknown> | null;
+  };
+  input_json?: Record<string, unknown> | null;
+  output_json?: Record<string, unknown> | null;
+  output_validated_json?: Record<string, unknown> | null;
+  validation_errors: Record<string, unknown>[];
+  notes: string[];
+};
+
 const buildRecallStorageKey = (request: ExaRecallRequest) => {
   const normalized = {
     query: request.query,
@@ -335,6 +386,10 @@ export default function App() {
   const [judgeCandidateIds, setJudgeCandidateIds] = useState("");
   const [judgeTopK, setJudgeTopK] = useState(5);
   const [judgeResponse, setJudgeResponse] = useState<CandidateJudgeResponse | null>(null);
+  const [llmRunsRunId, setLlmRunsRunId] = useState("");
+  const [llmRunsList, setLlmRunsList] = useState<LlmRunListResponse | null>(null);
+  const [llmRunDetail, setLlmRunDetail] = useState<LlmRunDetail | null>(null);
+  const [llmRunsOnlyErrors, setLlmRunsOnlyErrors] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<ReturnType<typeof normalizeError>[]>([]);
 
@@ -454,6 +509,32 @@ export default function App() {
       errors,
     } as DebugCandidateJudgeSummary);
   }, [judgeResponse]);
+
+  const llmRunsSummaryText = useMemo(() => {
+    if (!llmRunsList) {
+      return null;
+    }
+    const models = new Set<string>();
+    const errors = llmRunsList.items.filter((item) => item.has_validation_errors);
+    llmRunsList.items.forEach((item) => {
+      if (item.model_name) {
+        models.add(item.model_name);
+      }
+    });
+    const topErrors = errors
+      .slice(0, 3)
+      .map((item) => ({
+        phase: item.phase_name ?? undefined,
+        message: item.short_error ?? "validation_error",
+      }));
+    return buildChatGptLlmRunsSummary({
+      runId: llmRunsList.run_id,
+      total: llmRunsList.items.length,
+      withErrors: errors.length,
+      models: Array.from(models),
+      topErrors,
+    } as DebugLlmRunsSummary);
+  }, [llmRunsList]);
 
   const recallDuplicateUrls = useMemo(() => {
     if (!recallResponse) {
@@ -731,6 +812,41 @@ export default function App() {
     } catch (error) {
       setErrors([normalizeError(error)]);
       setJudgeResponse(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadLlmRuns = async () => {
+    const runId = llmRunsRunId.trim();
+    if (!runId) {
+      setErrors([normalizeError(new Error("Provide run_id."))]);
+      return;
+    }
+    setLoading(true);
+    setErrors([]);
+    try {
+      const data = await listLlmRunsByRun(runId);
+      const response = data as LlmRunListResponse;
+      setLlmRunsList(response);
+      setLlmRunDetail(null);
+    } catch (error) {
+      setErrors([normalizeError(error)]);
+      setLlmRunsList(null);
+      setLlmRunDetail(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadLlmRunDetail = async (runId: string) => {
+    setLoading(true);
+    try {
+      const data = await getLlmRunDetail(runId);
+      setLlmRunDetail(data as LlmRunDetail);
+    } catch (error) {
+      setErrors([normalizeError(error)]);
+      setLlmRunDetail(null);
     } finally {
       setLoading(false);
     }
@@ -1745,10 +1861,199 @@ export default function App() {
             </section>
           ) : null}
 
+          {activeTab === "LLM Runs" ? (
+            <section className="space-y-6">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <div className="text-2xl font-semibold">LLM Runs</div>
+                  <div className="text-xs text-slate-400">
+                    Listing and detail view with validation errors visible.
+                  </div>
+                </div>
+                <CopyForChatgptButton textOverride={llmRunsSummaryText ?? undefined} />
+              </div>
+
+              <section className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+                <div className="text-sm font-semibold text-slate-200">Load by run_id</div>
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <input
+                    value={llmRunsRunId}
+                    onChange={(event) => setLlmRunsRunId(event.target.value)}
+                    placeholder="run uuid"
+                    className="flex-1 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100"
+                  />
+                  <button
+                    onClick={loadLlmRuns}
+                    className="rounded-md bg-slate-200 px-3 py-2 text-xs font-semibold text-slate-900"
+                    type="button"
+                    disabled={loading}
+                  >
+                    Charger
+                  </button>
+                  <label className="flex items-center gap-2 text-xs text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={llmRunsOnlyErrors}
+                      onChange={(event) => setLlmRunsOnlyErrors(event.target.checked)}
+                    />
+                    errors only
+                  </label>
+                </div>
+              </section>
+
+              {llmRunsList ? (
+                <section className="grid gap-4 md:grid-cols-[1.2fr_1.8fr]">
+                  <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+                    <div className="text-xs uppercase text-slate-400">LLM Runs</div>
+                    <div className="mt-3 space-y-2 text-xs text-slate-300">
+                      {(llmRunsOnlyErrors
+                        ? llmRunsList.items.filter((item) => item.has_validation_errors)
+                        : llmRunsList.items
+                      ).map((item) => (
+                        <button
+                          key={item.id}
+                          onClick={() => loadLlmRunDetail(item.id)}
+                          className="w-full rounded-md border border-slate-800 bg-slate-950/60 px-3 py-2 text-left hover:border-slate-600"
+                          type="button"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="font-semibold text-slate-200">{item.id}</div>
+                            {item.validation_errors_count > 0 ? (
+                              <span className="rounded-full border border-red-800 px-2 py-0.5 text-[10px] text-red-200">
+                                {item.validation_errors_count} errors
+                              </span>
+                            ) : (
+                              <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] text-slate-300">
+                                ok
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-1 text-[11px] text-slate-400">
+                            {item.created_at ?? "n/a"} · {item.phase_name ?? "phase n/a"} ·{" "}
+                            {item.status ?? "status n/a"} · {item.model_name ?? "model n/a"}
+                          </div>
+                          {item.short_error ? (
+                            <div className="mt-1 text-[11px] text-red-300">
+                              {item.short_error}
+                            </div>
+                          ) : null}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+                    <div className="text-xs uppercase text-slate-400">Detail</div>
+                    {llmRunDetail ? (
+                      <div className="space-y-4">
+                        {llmRunDetail.validation_errors.length ? (
+                          <div className="rounded-lg border border-red-900 bg-red-950/40 p-3 text-xs text-red-100">
+                            <div className="flex items-start justify-between gap-4">
+                              <div>
+                                <div className="text-sm font-semibold text-red-200">
+                                  Validation errors
+                                </div>
+                                <ul className="mt-2 space-y-1">
+                                  {llmRunDetail.validation_errors.slice(0, 2).map((error, index) => (
+                                    <li key={`llm-error-${index}`}>
+                                      {typeof error["message"] === "string"
+                                        ? error["message"]
+                                        : JSON.stringify(error)}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                              <button
+                                onClick={() =>
+                                  navigator.clipboard.writeText(
+                                    JSON.stringify(llmRunDetail.validation_errors, null, 2)
+                                  )
+                                }
+                                className="rounded-md bg-red-200 px-3 py-2 text-xs font-semibold text-red-950"
+                                type="button"
+                              >
+                                📋 Copier erreur brute
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+
+                        <div className="text-xs text-slate-300">
+                          <div className="text-sm font-semibold text-slate-100">
+                            {llmRunDetail.id}
+                          </div>
+                          <div className="mt-1">
+                            phase: {llmRunDetail.phase_name ?? "n/a"} · status:{" "}
+                            {llmRunDetail.status ?? "n/a"} · model:{" "}
+                            {llmRunDetail.model_name ?? "n/a"}
+                          </div>
+                        </div>
+
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-300">
+                          <div className="font-semibold text-slate-200">Prompt</div>
+                          <div className="mt-1">
+                            {llmRunDetail.prompt.name ?? "prompt"} ·{" "}
+                            {llmRunDetail.prompt.version ?? "v?"}
+                          </div>
+                          <div className="mt-1 text-[11px] text-slate-400">
+                            hash: {llmRunDetail.prompt.content_hash ?? "n/a"}
+                          </div>
+                          <div className="mt-2 flex gap-2">
+                            <button
+                              onClick={() =>
+                                navigator.clipboard.writeText(llmRunDetail.prompt.content ?? "")
+                              }
+                              className="rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate-200"
+                              type="button"
+                            >
+                              Copier prompt
+                            </button>
+                            <button
+                              onClick={() =>
+                                navigator.clipboard.writeText(
+                                  JSON.stringify(llmRunDetail.json_schema.schema ?? {}, null, 2)
+                                )
+                              }
+                              className="rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate-200"
+                              type="button"
+                            >
+                              Copier schema
+                            </button>
+                          </div>
+                        </div>
+
+                        <FoldableJson title="input_json" data={llmRunDetail.input_json} />
+                        <FoldableJson title="output_json" data={llmRunDetail.output_json} />
+                        <FoldableJson
+                          title="output_validated_json"
+                          data={llmRunDetail.output_validated_json}
+                        />
+                        <FoldableJson
+                          title="validation_errors"
+                          data={llmRunDetail.validation_errors}
+                        />
+                        <FoldableJson title="llm_run (raw)" data={llmRunDetail} />
+                      </div>
+                    ) : (
+                      <div className="mt-3 text-sm text-slate-400">
+                        Select an LLM run to view details.
+                      </div>
+                    )}
+                  </div>
+                </section>
+              ) : (
+                <section className="rounded-xl border border-dashed border-slate-800 bg-slate-900/20 p-6 text-sm text-slate-400">
+                  No LLM runs loaded. Provide a run_id to list LLM runs.
+                </section>
+              )}
+            </section>
+          ) : null}
+
           {activeTab !== "Run Explorer" &&
           activeTab !== "Snapshot Inspector" &&
           activeTab !== "Recall Lab (Exa)" &&
-          activeTab !== "Candidate Judge" ? (
+          activeTab !== "Candidate Judge" &&
+          activeTab !== "LLM Runs" ? (
             <section className="rounded-xl border border-dashed border-slate-800 bg-slate-900/20 p-6 text-sm text-slate-400">
               {activeTab} is a placeholder. Use Run Explorer or Snapshot Inspector for now.
             </section>

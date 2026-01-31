@@ -11,6 +11,11 @@ from modules.discovery_compare.adapters.schemas.debug_exa_recall_v1 import (
     ExaRecallResponseV1,
     ExaResultItemV1,
 )
+from modules.discovery_compare.adapters.schemas.debug_llm_runs_v1 import (
+    LlmRunDetailResponseV1,
+    LlmRunListItemV1,
+    LlmRunListResponseV1,
+)
 from modules.discovery_compare.adapters.schemas.debug_run_diff_v1 import (
     CompareRunDiffResponseV1,
     DiffSeverityV1,
@@ -74,4 +79,7 @@ __all__ = [
     "CandidateJudgeResultV1",
     "CandidateJudgeRequestV1",
     "CandidateJudgeResponseV1",
+    "LlmRunListItemV1",
+    "LlmRunListResponseV1",
+    "LlmRunDetailResponseV1",
 ]

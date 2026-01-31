@@ -198,3 +198,11 @@ export async function judgeCandidates(payload: CandidateJudgeRequest) {
   }
   return response.json();
 }
+
+export async function listLlmRunsByRun(runId: string) {
+  return debugGet(`/v1/debug/llm-runs:by-run/${runId}`);
+}
+
+export async function getLlmRunDetail(runId: string) {
+  return debugGet(`/v1/debug/llm-runs/${runId}:detail`);
+}

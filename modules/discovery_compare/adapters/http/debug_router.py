@@ -20,6 +20,11 @@ from modules.discovery_compare.adapters.schemas.debug_exa_recall_v1 import (
     ExaRecallResponseV1,
     ExaResultItemV1,
 )
+from modules.discovery_compare.adapters.schemas.debug_llm_runs_v1 import (
+    LlmRunDetailResponseV1,
+    LlmRunListItemV1,
+    LlmRunListResponseV1,
+)
 from modules.discovery_compare.adapters.schemas.debug_run_diff_v1 import (
     CompareRunDiffResponseV1,
     DiffSeverityV1,
@@ -283,6 +288,39 @@ def _build_digest_from_inputs(
         source_url=url,
         attributes=attributes,
     )
+
+
+def _validation_errors_list(value: object | None) -> list[dict]:
+    if isinstance(value, list):
+        return [item if isinstance(item, dict) else {"message": str(item)} for item in value]
+    if isinstance(value, dict):
+        return [value]
+    return []
+
+
+def _short_validation_error(errors: list[dict]) -> str | None:
+    if not errors:
+        return None
+    first = errors[0]
+    if isinstance(first, dict):
+        if isinstance(first.get("message"), str):
+            return first["message"]
+        if isinstance(first.get("error"), str):
+            return first["error"]
+    return str(first)
+
+
+def _infer_phase_name(events: list[RunEvent], created_at: datetime | None) -> str | None:
+    if not events:
+        return None
+    if created_at is None:
+        return events[-1].phase_name
+    prior = [event for event in events if event.created_at <= created_at]
+    if prior:
+        return prior[-1].phase_name
+    return min(
+        events, key=lambda event: abs((event.created_at - created_at).total_seconds())
+    ).phase_name
 
 
 def _resolve_digest_input(
@@ -869,6 +907,118 @@ def debug_candidate_judge(payload: CandidateJudgeRequestV1) -> CandidateJudgeRes
             ranked_top_k=ranked_indices[: payload.ranking_top_k],
             metrics=metrics,
             raw=None,
+        )
+    finally:
+        session.close()
+
+
+@router.get("/llm-runs:by-run/{run_id}", response_model=LlmRunListResponseV1)
+def list_llm_runs(run_id: str) -> LlmRunListResponseV1:
+    session = get_session()
+    try:
+        run_uuid = uuid.UUID(run_id)
+        llm_runs = (
+            session.query(LlmRun)
+            .filter(LlmRun.run_id == run_uuid)
+            .order_by(LlmRun.created_at.desc(), LlmRun.id.desc())
+            .all()
+        )
+        events = (
+            session.query(RunEvent)
+            .filter(RunEvent.run_id == run_uuid)
+            .order_by(RunEvent.created_at.asc())
+            .all()
+        )
+        counts: dict[str, int] = {}
+        items: list[LlmRunListItemV1] = []
+        with_validation_errors = 0
+        for llm_run in llm_runs:
+            errors = _validation_errors_list(llm_run.validation_errors)
+            has_errors = bool(errors)
+            if has_errors:
+                with_validation_errors += 1
+            status = llm_run.status or "unknown"
+            counts[status] = counts.get(status, 0) + 1
+            items.append(
+                LlmRunListItemV1(
+                    id=str(llm_run.id),
+                    run_id=str(llm_run.run_id),
+                    created_at=llm_run.created_at,
+                    status=llm_run.status,
+                    model_name=llm_run.model_name,
+                    prompt_id=str(llm_run.prompt_id) if llm_run.prompt_id else None,
+                    prompt_hash=llm_run.prompt_hash,
+                    json_schema_hash=llm_run.json_schema_hash,
+                    phase_name=_infer_phase_name(events, llm_run.created_at),
+                    has_validation_errors=has_errors,
+                    validation_errors_count=len(errors),
+                    short_error=_short_validation_error(errors),
+                )
+            )
+        return LlmRunListResponseV1(
+            run_id=run_id,
+            items=items,
+            counts={
+                "total": len(llm_runs),
+                "by_status": counts,
+                "with_validation_errors": with_validation_errors,
+            },
+        )
+    finally:
+        session.close()
+
+
+@router.get("/llm-runs/{run_id}:detail", response_model=LlmRunDetailResponseV1)
+def get_llm_run_detail(run_id: str) -> LlmRunDetailResponseV1:
+    session = get_session()
+    try:
+        llm_run = session.get(LlmRun, run_id)
+        if llm_run is None:
+            raise HTTPException(status_code=404, detail="llm run not found")
+        events = (
+            session.query(RunEvent)
+            .filter(RunEvent.run_id == llm_run.run_id)
+            .order_by(RunEvent.created_at.asc())
+            .all()
+        )
+        phase_name = _infer_phase_name(events, llm_run.created_at)
+        prompt = None
+        if llm_run.prompt_id:
+            prompt = session.get(Prompt, llm_run.prompt_id)
+
+        prompt_payload = {
+            "id": str(prompt.id)
+            if prompt
+            else str(llm_run.prompt_id)
+            if llm_run.prompt_id
+            else None,
+            "name": prompt.name if prompt else None,
+            "version": prompt.version if prompt else None,
+            "content_hash": prompt.content_hash if prompt else llm_run.prompt_hash,
+            "content": prompt.content if prompt else llm_run.prompt_content,
+        }
+        json_schema_payload = {
+            "hash": llm_run.json_schema_hash,
+            "schema": llm_run.json_schema,
+        }
+        errors = _validation_errors_list(llm_run.validation_errors)
+        notes = ["phase_name inferred from run_events"] if phase_name else []
+
+        return LlmRunDetailResponseV1(
+            id=str(llm_run.id),
+            run_id=str(llm_run.run_id),
+            created_at=llm_run.created_at,
+            status=llm_run.status,
+            model_name=llm_run.model_name,
+            model_params=llm_run.model_params,
+            phase_name=phase_name,
+            prompt=prompt_payload,
+            json_schema=json_schema_payload,
+            input_json=llm_run.input_json,
+            output_json=llm_run.output_json,
+            output_validated_json=llm_run.output_validated_json,
+            validation_errors=errors,
+            notes=notes,
         )
     finally:
         session.close()

@@ -112,6 +112,8 @@ Verrous techniques en place:
 - GET /v1/debug/compare-runs/{run_id}:summary
 - GET /v1/debug/compare-runs:diff
 - GET /v1/debug/llm-runs/{id}
+- GET /v1/debug/llm-runs:by-run/{run_id}
+- GET /v1/debug/llm-runs/{id}:detail
 - GET /v1/debug/tool-runs/{id}
 - GET /v1/debug/snapshots/{id}
 - GET /v1/debug/snapshots:by-url
@@ -204,7 +206,7 @@ Flux reel declenche par `POST /v1/discovery/compare`.
 
 ## Webapp Debug (as-is)
 - emplacement: apps/web/debug (Vite + React + Tailwind)
-- pages: Run Explorer (listing + pagination + detail condense + mode diff), Snapshot Inspector (capture URL + lookup snapshot_id/URL), Recall Lab (Exa) (inputs + results + annotations localStorage), Candidate Judge (snapshot_id inputs + resultats condenses + breakdown/JSON foldable), autres sections en placeholders de navigation
+- pages: Run Explorer (listing + pagination + detail condense + mode diff), Snapshot Inspector (capture URL + lookup snapshot_id/URL), Recall Lab (Exa) (inputs + results + annotations localStorage), Candidate Judge (snapshot_id inputs + resultats condenses + breakdown/JSON foldable), LLM Runs (listing par run_id + detail avec prompt/schema/input/output + erreurs visibles), autres sections en placeholders de navigation
 - limitations: JSON complet charge a la demande uniquement (bouton ou foldable JSON brut)
 - primitives UI: FoldableJson, ErrorBanner (visible sans scroll), CopyForChatgptButton (resume texte sans JSON brut)
 - auth debug: ajoute `X-Debug-Token` sur toutes les requetes debug via VITE_DEBUG_API_TOKEN
@@ -251,6 +253,7 @@ As-is uniquement : aucune entree "a venir".
 - PR19: snapshot inspector endpoints + webapp snapshot inspector OK
 - PR20: debug exa recall endpoint + Recall Lab UI (localStorage annotations) OK
 - PR21: debug candidate judge endpoint + Candidate Judge UI OK
+- PR22: debug llm runs listing + LLM Runs Explorer UI OK
 
 ## Decisions & Rationale (datees)
 - 2026-01-29: Choix PostgreSQL + Alembic (source unique de verite) avec drift guard bloquant par defaut.
@@ -290,5 +293,6 @@ As-is uniquement : aucune entree "a venir".
 - 2026-01-31: Debug snapshot ajoute capture/lookup sans resolution de content_ref (lecture Postgres uniquement) ; tests utilisent provider stub pour rester sans reseau.
 - 2026-01-31: Recall Lab Exa stocke les annotations en localStorage (pas de DB) et expose la reponse brute foldable via endpoint debug.
 - 2026-01-31: Candidate Judge debug consomme exclusivement des digests/extractions (Postgres ou payload) et expose un breakdown deterministe pour audit (pas de capture/reseau).
+- 2026-01-31: LLM Runs debug ajoute un listing leger par run + detail lourd; phase_name est inferee depuis run_events (best-effort) pour eviter une migration.
 - 2026-01-29: `strategy.md` est réservé à ChatGPT (mise à jour uniquement sur demande explicite de l’utilisateur).
 - 2026-01-29: Les stratégies spécifiques par module, si nécessaires, doivent être dérivées de `strategy.md` sans créer de dépendance inverse ni contredire la gouvernance documentaire (statut et périmètre explicités).
